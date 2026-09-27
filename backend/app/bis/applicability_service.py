@@ -1,0 +1,1865 @@
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+class BISApplicabilityService:
+    """
+    Evidence-aware applicability evaluation for BIS standards.
+
+    IMPORTANT:
+    - BIS standards are never invented here.
+    - Standard identity comes from the retrieval/evidence layer.
+    - Gemini output is not treated as authoritative BIS evidence.
+    - Evidence availability is separated from applicability.
+    - Direct applicability requires meaningful procurement alignment.
+    - Supporting relationships such as testing, sampling, safety,
+      terminology and normative references are preserved.
+    - Insufficient evidence remains NEEDS_VERIFICATION.
+    """
+
+    DIRECT = "DIRECTLY_APPLICABLE"
+    SUPPORTING = "RELATED_SUPPORTING"
+    TEST_METHOD = "TEST_METHOD"
+    SAMPLING = "SAMPLING_METHOD"
+    SAFETY = "SAFETY_RELATED"
+    NORMATIVE = "NORMATIVE_REFERENCE"
+    TERMINOLOGY = "TERMINOLOGY_REFERENCE"
+    POTENTIAL = "POTENTIALLY_RELEVANT"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    NEEDS_VERIFICATION = "NEEDS_VERIFICATION"
+
+    def __init__(
+        self,
+        minimum_direct_score: float = 0.65,
+    ):
+        self.minimum_direct_score = minimum_direct_score
+
+    # ------------------------------------------------------------------
+    # Generic helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _clean(value: Any) -> str:
+        if value is None:
+            return ""
+
+        if isinstance(value, list):
+            return " ".join(
+                BISApplicabilityService._clean(item)
+                for item in value
+            )
+
+        if isinstance(value, dict):
+            return " ".join(
+                BISApplicabilityService._clean(item)
+                for item in value.values()
+            )
+
+        return str(value).strip()
+
+    @staticmethod
+    def _lower(value: Any) -> str:
+        return BISApplicabilityService._clean(value).lower()
+
+    @staticmethod
+    def _tokens(value: Any) -> set[str]:
+        text = BISApplicabilityService._lower(value)
+
+        return {
+            token
+            for token in re.findall(
+                r"[a-z0-9]+",
+                text,
+            )
+            if len(token) >= 3
+        }
+
+    @staticmethod
+    def _extract_standard_number(
+        candidate: dict[str, Any],
+    ) -> str | None:
+        return (
+            candidate.get("standardNumber")
+            or candidate.get("standard_number")
+        )
+
+    @staticmethod
+    def _extract_standard_name(
+        candidate: dict[str, Any],
+    ) -> str | None:
+        return (
+            candidate.get("standardName")
+            or candidate.get("standard_name")
+        )
+
+    @staticmethod
+    def _extract_evidence(
+        enriched_candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        evidence = enriched_candidate.get("evidence")
+
+        if isinstance(evidence, dict):
+            return evidence
+
+        return {}
+
+    @staticmethod
+    def _extract_result_data(
+        evidence_item: Any,
+    ) -> Any:
+        if not isinstance(evidence_item, dict):
+            return None
+
+        data = evidence_item.get("data")
+
+        if isinstance(data, dict) and "data" in data:
+            return data.get("data")
+
+        return data
+
+    @staticmethod
+    def _is_successful(
+        evidence_item: Any,
+    ) -> bool:
+        return (
+            isinstance(evidence_item, dict)
+            and evidence_item.get("success") is True
+        )
+
+    @staticmethod
+    def _record_text(
+        record: Any,
+    ) -> str:
+        if isinstance(record, dict):
+            preferred_fields = [
+                "standardNumber",
+                "standard_number",
+                "standardName",
+                "standard_name",
+                "shortTitle",
+                "title",
+                "name",
+                "description",
+                "relationship",
+                "relationshipType",
+                "type",
+                "remarks",
+                "remarksDescription",
+            ]
+
+            parts: list[str] = []
+
+            for field in preferred_fields:
+                value = record.get(field)
+
+                if value:
+                    parts.append(
+                        BISApplicabilityService._clean(value)
+                    )
+
+            if parts:
+                return " ".join(parts)
+
+        return BISApplicabilityService._clean(record)
+
+    @staticmethod
+    def _contains_any(
+        text: str,
+        phrases: list[str],
+    ) -> bool:
+        value = text.lower()
+
+        return any(
+            phrase.lower() in value
+            for phrase in phrases
+        )
+
+    # ------------------------------------------------------------------
+    # Procurement text
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_procurement_text(
+        procurement: dict[str, Any],
+    ) -> str:
+        fields = [
+            "product_name",
+            "product",
+            "product_category",
+            "description",
+            "procurement_purpose",
+            "intended_application",
+            "material",
+            "materials",
+            "technical_specifications",
+            "technical_requirements",
+            "performance_requirements",
+            "safety_requirements",
+            "hazards",
+            "testing_requirements",
+            "certification_context",
+        ]
+
+        parts: list[str] = []
+
+        for field in fields:
+            value = procurement.get(field)
+
+            if value:
+                parts.append(
+                    f"{field}: "
+                    f"{BISApplicabilityService._clean(value)}"
+                )
+
+        return " ".join(parts)
+
+    # ------------------------------------------------------------------
+    # Standard text
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_standard_text(
+        candidate: dict[str, Any],
+        evidence: dict[str, Any],
+    ) -> str:
+        parts: list[str] = []
+
+        fields = [
+            "standardNumber",
+            "standardName",
+            "standardNameInHindi",
+            "matched_standard",
+            "shortTitle",
+            "typeOfStandardId",
+            "groupName",
+            "subGroupName",
+            "subSubGroupName",
+            "committeeName",
+            "departmentName",
+            "equivalentIs",
+        ]
+
+        for field in fields:
+            if candidate.get(field):
+                parts.append(
+                    BISApplicabilityService._clean(
+                        candidate.get(field)
+                    )
+                )
+
+        standard_result = evidence.get("standard")
+
+        if isinstance(
+            standard_result,
+            dict,
+        ):
+            standard_data = standard_result.get("data")
+
+            if isinstance(
+                standard_data,
+                dict,
+            ):
+                if isinstance(
+                    standard_data.get("data"),
+                    dict,
+                ):
+                    standard_data = standard_data.get(
+                        "data"
+                    )
+
+                for field in [
+                    "standardName",
+                    "standardNumber",
+                    "standardNameInHindi",
+                    "shortTitle",
+                    "typeOfStandardId",
+                    "groupName",
+                    "subGroupName",
+                    "subSubGroupName",
+                    "committeeName",
+                    "departmentName",
+                    "equivalentIs",
+                ]:
+                    if standard_data.get(field):
+                        parts.append(
+                            BISApplicabilityService._clean(
+                                standard_data.get(field)
+                            )
+                        )
+
+        return " ".join(parts)
+
+    # ------------------------------------------------------------------
+    # Keyword overlap
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def calculate_token_overlap(
+        procurement_text: str,
+        standard_text: str,
+    ) -> dict[str, Any]:
+        procurement_tokens = (
+            BISApplicabilityService._tokens(
+                procurement_text
+            )
+        )
+
+        standard_tokens = (
+            BISApplicabilityService._tokens(
+                standard_text
+            )
+        )
+
+        if (
+            not procurement_tokens
+            or not standard_tokens
+        ):
+            return {
+                "score": 0.0,
+                "matched_tokens": [],
+                "procurement_token_count": len(
+                    procurement_tokens
+                ),
+                "standard_token_count": len(
+                    standard_tokens
+                ),
+            }
+
+        matched = sorted(
+            procurement_tokens.intersection(
+                standard_tokens
+            )
+        )
+
+        union = (
+            procurement_tokens.union(
+                standard_tokens
+            )
+        )
+
+        score = (
+            len(matched) / len(union)
+            if union
+            else 0.0
+        )
+
+        return {
+            "score": round(
+                score,
+                4,
+            ),
+            "matched_tokens": matched,
+            "procurement_token_count": len(
+                procurement_tokens
+            ),
+            "standard_token_count": len(
+                standard_tokens
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Field-aware applicability signals
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_requirement_groups(
+        procurement: dict[str, Any],
+    ) -> dict[str, str]:
+        return {
+            "product": BISApplicabilityService._clean(
+                procurement.get("product_name")
+                or procurement.get("product")
+            ),
+            "category": BISApplicabilityService._clean(
+                procurement.get("product_category")
+            ),
+            "application": BISApplicabilityService._clean(
+                procurement.get(
+                    "intended_application"
+                )
+            ),
+            "technical": BISApplicabilityService._clean(
+                procurement.get(
+                    "technical_requirements"
+                )
+                or procurement.get(
+                    "technical_specifications"
+                )
+            ),
+            "performance": BISApplicabilityService._clean(
+                procurement.get(
+                    "performance_requirements"
+                )
+            ),
+            "safety": BISApplicabilityService._clean(
+                procurement.get(
+                    "safety_requirements"
+                )
+                or procurement.get(
+                    "hazards"
+                )
+            ),
+            "testing": BISApplicabilityService._clean(
+                procurement.get(
+                    "testing_requirements"
+                )
+            ),
+            "material": BISApplicabilityService._clean(
+                procurement.get(
+                    "material"
+                )
+                or procurement.get(
+                    "materials"
+                )
+            ),
+        }
+
+    @staticmethod
+    def _field_match_score(
+        procurement: dict[str, Any],
+        standard_text: str,
+    ) -> dict[str, Any]:
+        groups = (
+            BISApplicabilityService._build_requirement_groups(
+                procurement
+            )
+        )
+
+        results: dict[str, Any] = {}
+
+        weights = {
+            "product": 0.30,
+            "category": 0.15,
+            "application": 0.15,
+            "technical": 0.12,
+            "performance": 0.10,
+            "safety": 0.08,
+            "testing": 0.06,
+            "material": 0.04,
+        }
+
+        weighted_score = 0.0
+        active_weight = 0.0
+
+        for field, value in groups.items():
+            if not value:
+                continue
+
+            overlap = (
+                BISApplicabilityService.calculate_token_overlap(
+                    value,
+                    standard_text,
+                )
+            )
+
+            score = overlap["score"]
+            weight = weights.get(
+                field,
+                0.0,
+            )
+
+            weighted_score += (
+                score * weight
+            )
+
+            active_weight += weight
+
+            results[field] = {
+                "score": score,
+                "matched_tokens": overlap[
+                    "matched_tokens"
+                ],
+            }
+
+        normalized = (
+            weighted_score / active_weight
+            if active_weight
+            else 0.0
+        )
+
+        return {
+            "score": round(
+                normalized,
+                4,
+            ),
+            "fields": results,
+        }
+
+    # ------------------------------------------------------------------
+    # Cross-reference extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def extract_relationships(
+        evidence: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """
+        Extract BIS relationship records.
+
+        Current BIS response shape:
+
+        {
+            "success": true,
+            "data": [
+                {
+                    "relationshipType": "CROSS_REFERENCE",
+                    "standardNumber": "IS 7692:2024",
+                    ...
+                },
+                {
+                    "relationshipType": "CROSS_FOLLOW_REFERENCE",
+                    ...
+                }
+            ]
+        }
+
+        Older/nested response shapes are also supported.
+        """
+
+        relationship_result = evidence.get(
+            "relationships"
+        )
+
+        if not isinstance(
+            relationship_result,
+            dict,
+        ):
+            return {
+                "cross_references": [],
+                "cross_follow_references": [],
+            }
+
+        if not relationship_result.get(
+            "success"
+        ):
+            return {
+                "cross_references": [],
+                "cross_follow_references": [],
+            }
+
+        data = relationship_result.get(
+            "data"
+        )
+
+        # --------------------------------------------------------------
+        # Handle nested response:
+        #
+        # data = {
+        #     "data": [...]
+        # }
+        #
+        # or:
+        #
+        # data = {
+        #     "crossRefData": [...],
+        #     "crossFollowRefData": [...]
+        # }
+        # --------------------------------------------------------------
+
+        if isinstance(
+            data,
+            dict,
+        ):
+            if isinstance(
+                data.get("data"),
+                list,
+            ):
+                data = data.get(
+                    "data"
+                )
+
+            else:
+                cross_ref = data.get(
+                    "crossRefData"
+                )
+
+                cross_follow = data.get(
+                    "crossFollowRefData"
+                )
+
+                if (
+                    isinstance(cross_ref, list)
+                    or isinstance(cross_follow, list)
+                ):
+                    return {
+                        "cross_references": (
+                            cross_ref
+                            if isinstance(
+                                cross_ref,
+                                list,
+                            )
+                            else []
+                        ),
+                        "cross_follow_references": (
+                            cross_follow
+                            if isinstance(
+                                cross_follow,
+                                list,
+                            )
+                            else []
+                        ),
+                    }
+
+                return {
+                    "cross_references": [],
+                    "cross_follow_references": [],
+                }
+
+        # --------------------------------------------------------------
+        # Current BIS response is a direct list.
+        # --------------------------------------------------------------
+
+        if not isinstance(
+            data,
+            list,
+        ):
+            return {
+                "cross_references": [],
+                "cross_follow_references": [],
+            }
+
+        cross_references: list[
+            dict[str, Any]
+        ] = []
+
+        cross_follow_references: list[
+            dict[str, Any]
+        ] = []
+
+        for record in data:
+            if not isinstance(
+                record,
+                dict,
+            ):
+                continue
+
+            relationship_type = str(
+                record.get(
+                    "relationshipType"
+                )
+                or record.get(
+                    "relationship_type"
+                )
+                or ""
+            ).upper()
+
+            if relationship_type == (
+                "CROSS_REFERENCE"
+            ):
+                cross_references.append(
+                    record
+                )
+
+            elif relationship_type == (
+                "CROSS_FOLLOW_REFERENCE"
+            ):
+                cross_follow_references.append(
+                    record
+                )
+
+        return {
+            "cross_references": (
+                cross_references
+            ),
+            "cross_follow_references": (
+                cross_follow_references
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Relationship classification
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def classify_relationship_text(
+        cls,
+        text: str,
+    ) -> str | None:
+        value = cls._lower(
+            text
+        )
+
+        if cls._contains_any(
+            value,
+            [
+                "test method",
+                "methods of test",
+                "method of test",
+                "testing method",
+                "test for",
+                "method for testing",
+                "methods for testing",
+                "test procedures",
+                "testing",
+            ],
+        ):
+            return cls.TEST_METHOD
+
+        if cls._contains_any(
+            value,
+            [
+                "sampling",
+                "sample",
+                "sampling method",
+                "methods of sampling",
+                "method for sampling",
+            ],
+        ):
+            return cls.SAMPLING
+
+        if cls._contains_any(
+            value,
+            [
+                "terminology",
+                "definitions",
+                "vocabulary",
+                "glossary",
+            ],
+        ):
+            return cls.TERMINOLOGY
+
+        if cls._contains_any(
+            value,
+            [
+                "safety",
+                "protective",
+                "protection",
+                "hazard",
+            ],
+        ):
+            return cls.SAFETY
+
+        if cls._contains_any(
+            value,
+            [
+                "normative reference",
+                "normative references",
+                "referred standard",
+                "reference standard",
+                "references",
+                "referenced standard",
+            ],
+        ):
+            return cls.NORMATIVE
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Evidence indicators
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_evidence_indicators(
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        amendments = evidence.get(
+            "amendments"
+        )
+
+        relationships = evidence.get(
+            "relationships"
+        )
+
+        summary = evidence.get(
+            "summary"
+        )
+
+        product_manuals = evidence.get(
+            "product_manuals"
+        )
+
+        licenses = evidence.get(
+            "licenses"
+        )
+
+        crs = evidence.get(
+            "crs"
+        )
+
+        mcs = evidence.get(
+            "mcs"
+        )
+
+        laboratories = evidence.get(
+            "laboratories"
+        )
+
+        indicators = {
+            "has_standard_details": (
+                BISApplicabilityService._is_successful(
+                    evidence.get(
+                        "standard"
+                    )
+                )
+            ),
+            "has_amendment_evidence": (
+                BISApplicabilityService._is_successful(
+                    amendments
+                )
+            ),
+            "has_relationship_evidence": (
+                BISApplicabilityService._is_successful(
+                    relationships
+                )
+            ),
+            "has_summary_metadata": (
+                BISApplicabilityService._is_successful(
+                    summary
+                )
+            ),
+            "has_product_manual_metadata": (
+                BISApplicabilityService._is_successful(
+                    product_manuals
+                )
+            ),
+            "has_license_evidence": (
+                BISApplicabilityService._is_successful(
+                    licenses
+                )
+            ),
+            "has_crs_evidence": (
+                BISApplicabilityService._is_successful(
+                    crs
+                )
+            ),
+            "has_mcs_evidence": (
+                BISApplicabilityService._is_successful(
+                    mcs
+                )
+            ),
+            "has_laboratory_evidence": (
+                BISApplicabilityService._is_successful(
+                    laboratories
+                )
+            ),
+        }
+
+        # Evidence confidence is deliberately separate from
+        # applicability. A successful endpoint does not prove
+        # that the standard applies to the procurement.
+        confidence = 0.0
+
+        if indicators[
+            "has_standard_details"
+        ]:
+            confidence += 0.45
+
+        if indicators[
+            "has_relationship_evidence"
+        ]:
+            confidence += 0.15
+
+        if indicators[
+            "has_amendment_evidence"
+        ]:
+            confidence += 0.10
+
+        if indicators[
+            "has_summary_metadata"
+        ]:
+            confidence += 0.05
+
+        if indicators[
+            "has_product_manual_metadata"
+        ]:
+            confidence += 0.05
+
+        if indicators[
+            "has_license_evidence"
+        ]:
+            confidence += 0.05
+
+        if indicators[
+            "has_crs_evidence"
+        ]:
+            confidence += 0.05
+
+        if indicators[
+            "has_mcs_evidence"
+        ]:
+            confidence += 0.05
+
+        if indicators[
+            "has_laboratory_evidence"
+        ]:
+            confidence += 0.05
+
+        indicators[
+            "evidence_confidence"
+        ] = round(
+            min(
+                1.0,
+                confidence,
+            ),
+            4,
+        )
+
+        return indicators
+
+    # ------------------------------------------------------------------
+    # Status / version information
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def extract_status_information(
+        candidate: dict[str, Any],
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        detail = evidence.get(
+            "standard"
+        )
+
+        detail_data: dict[str, Any] = {}
+
+        if isinstance(
+            detail,
+            dict,
+        ):
+            data = detail.get(
+                "data"
+            )
+
+            if isinstance(
+                data,
+                dict,
+            ):
+                detail_data = data
+
+                if isinstance(
+                    data.get("data"),
+                    dict,
+                ):
+                    detail_data = data.get(
+                        "data"
+                    )
+
+        return {
+            "withdraw_status": (
+                detail_data.get(
+                    "withdrawStatus"
+                )
+                if detail_data
+                else candidate.get(
+                    "withdrawStatus"
+                )
+            ),
+            "withdraw_on": (
+                detail_data.get(
+                    "withdrawOn"
+                )
+                if detail_data
+                else candidate.get(
+                    "withdrawOn"
+                )
+            ),
+            "valid_upto": (
+                detail_data.get(
+                    "validUpto"
+                )
+                if detail_data
+                else candidate.get(
+                    "validUpto"
+                )
+            ),
+            "published_on": (
+                detail_data.get(
+                    "publishedOn"
+                )
+                if detail_data
+                else candidate.get(
+                    "publishedOn"
+                )
+            ),
+            "review_on": detail_data.get(
+                "reviewOn"
+            ),
+            "reaffirmation_year": (
+                detail_data.get(
+                    "reAffirmationYear"
+                )
+            ),
+            "revision_count": (
+                detail_data.get(
+                    "noOfRevision"
+                )
+            ),
+            "amendment_count": (
+                detail_data.get(
+                    "noOfAmendment"
+                )
+            ),
+            "superseded_by": (
+                detail_data.get(
+                    "superseded_byis"
+                )
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Certification evidence
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def extract_certification_summary(
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "crs_records": 0,
+            "mcs_records": 0,
+            "license_records": 0,
+            "laboratory_records": 0,
+        }
+
+        for field, output_key in [
+            (
+                "crs",
+                "crs_records",
+            ),
+            (
+                "mcs",
+                "mcs_records",
+            ),
+            (
+                "licenses",
+                "license_records",
+            ),
+            (
+                "laboratories",
+                "laboratory_records",
+            ),
+        ]:
+            value = evidence.get(
+                field
+            )
+
+            if not isinstance(
+                value,
+                dict,
+            ):
+                continue
+
+            data = value.get(
+                "data"
+            )
+
+            if isinstance(
+                data,
+                dict,
+            ):
+                for key in [
+                    "records",
+                    "items",
+                    "data",
+                    "product_manuals_details",
+                ]:
+                    records = data.get(
+                        key
+                    )
+
+                    if isinstance(
+                        records,
+                        list,
+                    ):
+                        result[
+                            output_key
+                        ] = len(
+                            records
+                        )
+                        break
+
+            elif isinstance(
+                data,
+                list,
+            ):
+                result[
+                    output_key
+                ] = len(
+                    data
+                )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Applicability score
+    # ------------------------------------------------------------------
+
+    def calculate_applicability_signal(
+        self,
+        procurement_text: str,
+        standard_text: str,
+        *,
+        evidence: dict[str, Any],
+        procurement: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        overlap = (
+            self.calculate_token_overlap(
+                procurement_text,
+                standard_text,
+            )
+        )
+
+        lexical_score = overlap[
+            "score"
+        ]
+
+        evidence_indicators = (
+            self.build_evidence_indicators(
+                evidence
+            )
+        )
+
+        field_match = {
+            "score": 0.0,
+            "fields": {},
+        }
+
+        if procurement:
+            field_match = (
+                self._field_match_score(
+                    procurement,
+                    standard_text,
+                )
+            )
+
+        # The lexical score remains visible and explainable.
+        #
+        # The field-aware score is stronger because product,
+        # category, application, technical and safety requirements
+        # do not all have equal importance.
+        #
+        # Neither score alone is considered proof of applicability.
+
+        semantic_alignment = max(
+            lexical_score,
+            field_match[
+                "score"
+            ],
+        )
+
+        relationships = (
+            self.extract_relationships(
+                evidence
+            )
+        )
+
+        relationship_count = (
+            len(
+                relationships[
+                    "cross_references"
+                ]
+            )
+            +
+            len(
+                relationships[
+                    "cross_follow_references"
+                ]
+            )
+        )
+
+        relationship_signal = min(
+            0.10,
+            relationship_count * 0.02,
+        )
+
+        evidence_confidence = (
+            evidence_indicators[
+                "evidence_confidence"
+            ]
+        )
+
+        # Evidence confidence is intentionally capped in its
+        # contribution to applicability. It demonstrates that
+        # authoritative BIS evidence was found; it does not mean
+        # the procurement necessarily requires that standard.
+
+        evidence_signal = min(
+            0.15,
+            evidence_confidence * 0.15,
+        )
+
+        signal = min(
+            1.0,
+            (
+                semantic_alignment * 0.75
+                +
+                evidence_signal
+                +
+                relationship_signal
+            ),
+        )
+
+        return {
+            "lexical_overlap": overlap,
+
+            "field_alignment": field_match,
+
+            "semantic_alignment": round(
+                semantic_alignment,
+                4,
+            ),
+
+            "evidence_confidence": (
+                evidence_confidence
+            ),
+
+            "evidence_signal": round(
+                evidence_signal,
+                4,
+            ),
+
+            "relationship_signal": round(
+                relationship_signal,
+                4,
+            ),
+
+            "evidence_bonus": round(
+                evidence_signal
+                +
+                relationship_signal,
+                4,
+            ),
+
+            "signal_score": round(
+                signal,
+                4,
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Single candidate evaluation
+    # ------------------------------------------------------------------
+
+    def evaluate_candidate(
+        self,
+        procurement: dict[str, Any],
+        enriched_candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        candidate = enriched_candidate.get(
+            "candidate",
+            {},
+        )
+
+        evidence = self._extract_evidence(
+            enriched_candidate
+        )
+
+        standard_number = (
+            self._extract_standard_number(
+                candidate
+            )
+        )
+
+        standard_name = (
+            self._extract_standard_name(
+                candidate
+            )
+        )
+
+        procurement_text = (
+            self.build_procurement_text(
+                procurement
+            )
+        )
+
+        standard_text = (
+            self.build_standard_text(
+                candidate,
+                evidence,
+            )
+        )
+
+        signal = (
+            self.calculate_applicability_signal(
+                procurement_text,
+                standard_text,
+                evidence=evidence,
+                procurement=procurement,
+            )
+        )
+
+        relationships = (
+            self.extract_relationships(
+                evidence
+            )
+        )
+
+        relationship_matches: list[
+            dict[str, Any]
+        ] = []
+
+        for relation_type, records in [
+            (
+                "cross_reference",
+                relationships[
+                    "cross_references"
+                ],
+            ),
+            (
+                "cross_follow_reference",
+                relationships[
+                    "cross_follow_references"
+                ],
+            ),
+        ]:
+            for record in records:
+                relation_text = (
+                    self._record_text(
+                        record
+                    )
+                )
+
+                classification = (
+                    self.classify_relationship_text(
+                        relation_text
+                    )
+                )
+
+                relationship_matches.append(
+                    {
+                        "type": relation_type,
+                        "classification": (
+                            classification
+                            or self.SUPPORTING
+                        ),
+                        "record": record,
+                    }
+                )
+
+        status = (
+            self.extract_status_information(
+                candidate,
+                evidence,
+            )
+        )
+
+        certification = (
+            self.extract_certification_summary(
+                evidence
+            )
+        )
+
+        evidence_indicators = (
+            self.build_evidence_indicators(
+                evidence
+            )
+        )
+
+        # --------------------------------------------------------------
+        # Applicability classification
+        # --------------------------------------------------------------
+
+        classification = (
+            self.NEEDS_VERIFICATION
+        )
+
+        reasons: list[str] = []
+
+        if not standard_number:
+            reasons.append(
+                "The candidate has no normalized BIS "
+                "standard number."
+            )
+
+        if not self._is_successful(
+            evidence.get("standard")
+        ):
+            reasons.append(
+                "Authoritative BIS standard details "
+                "were not successfully retrieved."
+            )
+
+        semantic_alignment = signal[
+            "semantic_alignment"
+        ]
+
+        field_alignment = signal[
+            "field_alignment"
+        ]
+
+        evidence_confidence = (
+            signal[
+                "evidence_confidence"
+            ]
+        )
+
+        strong_product_match = (
+            field_alignment[
+                "fields"
+            ]
+            .get(
+                "product",
+                {},
+            )
+            .get(
+                "score",
+                0.0,
+            )
+            >= 0.45
+        )
+
+        strong_application_match = (
+            field_alignment[
+                "fields"
+            ]
+            .get(
+                "application",
+                {},
+            )
+            .get(
+                "score",
+                0.0,
+            )
+            >= 0.35
+        )
+
+        strong_technical_match = (
+            field_alignment[
+                "fields"
+            ]
+            .get(
+                "technical",
+                {},
+            )
+            .get(
+                "score",
+                0.0,
+            )
+            >= 0.35
+        )
+
+        strong_safety_match = (
+            field_alignment[
+                "fields"
+            ]
+            .get(
+                "safety",
+                {},
+            )
+            .get(
+                "score",
+                0.0,
+            )
+            >= 0.35
+        )
+
+        meaningful_requirement_match = (
+            strong_product_match
+            or strong_application_match
+            or strong_technical_match
+            or strong_safety_match
+        )
+
+        # DIRECT:
+        # Require authoritative BIS details plus a meaningful
+        # procurement-to-standard alignment. Evidence metadata alone
+        # can never create a direct recommendation.
+
+        if (
+            semantic_alignment
+            >= self.minimum_direct_score
+            and evidence_confidence >= 0.45
+            and meaningful_requirement_match
+            and status.get(
+                "withdraw_status"
+            ) != 1
+        ):
+            classification = self.DIRECT
+
+            reasons.append(
+                "The procurement requirements show strong "
+                "alignment with the BIS standard information."
+            )
+
+            reasons.append(
+                "Authoritative BIS standard details were "
+                "successfully retrieved."
+            )
+
+        # SUPPORTING:
+        # A candidate can be useful because BIS explicitly relates
+        # it to other standards, even when it is not itself the
+        # primary product standard.
+
+        elif relationship_matches:
+            classification = self.SUPPORTING
+
+            reasons.append(
+                "BIS relationship evidence was found, "
+                "but direct applicability was not established."
+            )
+
+            relationship_types = sorted(
+                {
+                    relation.get(
+                        "classification"
+                    )
+                    for relation in relationship_matches
+                    if relation.get(
+                        "classification"
+                    )
+                }
+            )
+
+            if relationship_types:
+                reasons.append(
+                    "Relationship evidence includes: "
+                    + ", ".join(
+                        relationship_types
+                    )
+                    + "."
+                )
+
+        # POTENTIAL:
+        # Meaningful alignment exists, but it is not strong enough
+        # for direct applicability.
+
+        elif (
+            semantic_alignment >= 0.30
+            and evidence_confidence >= 0.45
+        ):
+            classification = self.POTENTIAL
+
+            reasons.append(
+                "The candidate has partial procurement-to-"
+                "standard alignment."
+            )
+
+            reasons.append(
+                "Additional verification is required before "
+                "treating the standard as directly applicable."
+            )
+
+        else:
+            classification = (
+                self.NEEDS_VERIFICATION
+            )
+
+            reasons.append(
+                "Available evidence and requirement alignment "
+                "are insufficient to establish direct applicability."
+            )
+
+        if semantic_alignment < 0.30:
+            reasons.append(
+                "The measurable procurement-to-standard "
+                "alignment is currently below the applicability "
+                "threshold."
+            )
+
+        if evidence_confidence < 0.45:
+            reasons.append(
+                "Authoritative evidence coverage is incomplete."
+            )
+
+        # Withdrawn standards must never automatically become
+        # current recommendations.
+
+        if status.get(
+            "withdraw_status"
+        ) == 1:
+            classification = (
+                self.NEEDS_VERIFICATION
+            )
+
+            reasons.append(
+                "BIS search/detail evidence indicates "
+                "withdrawal status; current applicability "
+                "requires verification."
+            )
+
+        # Superseded standards also require verification.
+
+        if status.get(
+            "superseded_by"
+        ):
+            classification = (
+                self.NEEDS_VERIFICATION
+            )
+
+            reasons.append(
+                "BIS evidence indicates that this standard "
+                "has a superseding standard; current "
+                "applicability requires verification."
+            )
+
+        return {
+            "standard_number": standard_number,
+
+            "standard_name": standard_name,
+
+            "classification": classification,
+
+            "signal": signal,
+
+            "status": status,
+
+            "certification": certification,
+
+            "relationships": {
+                "cross_reference_count": len(
+                    relationships[
+                        "cross_references"
+                    ]
+                ),
+
+                "cross_follow_reference_count": len(
+                    relationships[
+                        "cross_follow_references"
+                    ]
+                ),
+
+                "classified_relationships": (
+                    relationship_matches
+                ),
+            },
+
+            "evidence_indicators": (
+                evidence_indicators
+            ),
+
+            "reasons": reasons,
+
+            "evidence": evidence,
+
+            "candidate": candidate,
+        }
+
+    # ------------------------------------------------------------------
+    # Evidence graph
+    # ------------------------------------------------------------------
+
+    def build_evidence_graph(
+        self,
+        evaluations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        nodes: list[
+            dict[str, Any]
+        ] = []
+
+        edges: list[
+            dict[str, Any]
+        ] = []
+
+        for evaluation in evaluations:
+            standard_number = (
+                evaluation.get(
+                    "standard_number"
+                )
+            )
+
+            if not standard_number:
+                continue
+
+            standard_node_id = (
+                f"standard:{standard_number}"
+            )
+
+            nodes.append(
+                {
+                    "id": standard_node_id,
+                    "type": "standard",
+                    "standard_number": (
+                        standard_number
+                    ),
+                    "standard_name": (
+                        evaluation.get(
+                            "standard_name"
+                        )
+                    ),
+                    "classification": (
+                        evaluation.get(
+                            "classification"
+                        )
+                    ),
+                }
+            )
+
+            relationships = (
+                evaluation.get(
+                    "relationships",
+                    {},
+                )
+            )
+
+            classified = (
+                relationships.get(
+                    "classified_relationships",
+                    [],
+                )
+            )
+
+            for relation in classified:
+                record = relation.get(
+                    "record",
+                    {},
+                )
+
+                related_number = (
+                    record.get(
+                        "standardNumber"
+                    )
+                    or record.get(
+                        "standard_number"
+                    )
+                    or record.get(
+                        "isNumber"
+                    )
+                    or record.get(
+                        "is_number"
+                    )
+                )
+
+                if not related_number:
+                    continue
+
+                related_node_id = (
+                    f"standard:{related_number}"
+                )
+
+                if not any(
+                    node["id"]
+                    == related_node_id
+                    for node in nodes
+                ):
+                    nodes.append(
+                        {
+                            "id": related_node_id,
+                            "type": "standard",
+                            "standard_number": (
+                                related_number
+                            ),
+                            "standard_name": (
+                                record.get(
+                                    "standardName"
+                                )
+                                or record.get(
+                                    "standard_name"
+                                )
+                            ),
+                        }
+                    )
+
+                edges.append(
+                    {
+                        "source": (
+                            standard_node_id
+                        ),
+                        "target": (
+                            related_node_id
+                        ),
+                        "type": (
+                            relation.get(
+                                "classification"
+                            )
+                            or self.SUPPORTING
+                        ),
+                        "source_type": (
+                            relation.get(
+                                "type"
+                            )
+                        ),
+                        "evidence": record,
+                    }
+                )
+
+        unique_nodes: dict[
+            str,
+            dict[str, Any],
+        ] = {}
+
+        for node in nodes:
+            unique_nodes[
+                node["id"]
+            ] = node
+
+        unique_edges: dict[
+            tuple[str, str, str],
+            dict[str, Any],
+        ] = {}
+
+        for edge in edges:
+            key = (
+                edge["source"],
+                edge["target"],
+                edge["type"],
+            )
+
+            unique_edges[key] = edge
+
+        return {
+            "nodes": list(
+                unique_nodes.values()
+            ),
+            "edges": list(
+                unique_edges.values()
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Evaluate complete candidate set
+    # ------------------------------------------------------------------
+
+    def evaluate_candidates(
+        self,
+        procurement: dict[str, Any],
+        enriched_candidates: list[
+            dict[str, Any]
+        ],
+    ) -> dict[str, Any]:
+        evaluations = [
+            self.evaluate_candidate(
+                procurement,
+                candidate,
+            )
+            for candidate in enriched_candidates
+        ]
+
+        graph = (
+            self.build_evidence_graph(
+                evaluations
+            )
+        )
+
+        counts: dict[
+            str,
+            int,
+        ] = {}
+
+        for evaluation in evaluations:
+            classification = (
+                evaluation.get(
+                    "classification",
+                    self.NEEDS_VERIFICATION,
+                )
+            )
+
+            counts[classification] = (
+                counts.get(
+                    classification,
+                    0,
+                )
+                + 1
+            )
+
+        return {
+            "success": True,
+
+            "total_candidates": len(
+                evaluations
+            ),
+
+            "classification_counts": counts,
+
+            "evaluations": evaluations,
+
+            "evidence_graph": graph,
+
+            "important_note": (
+                "Classification is an evidence-based "
+                "applicability signal. It is not a substitute "
+                "for official BIS or legal verification where "
+                "the available evidence is insufficient."
+            ),
+        }
