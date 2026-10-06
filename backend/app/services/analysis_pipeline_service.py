@@ -684,21 +684,50 @@ class AnalysisPipelineService:
                 "key_specifications": key_specs[:10],
             }
 
-            recommended_standards = frontend_result.get("recommended_standards") or frontend_result.get("standards") or []
+            primary_applicable = frontend_result.get("primary_applicable") or [
+                s for s in (frontend_result.get("recommended_standards") or [])
+                if s.get("human_classification") == "Highly Applicable"
+            ]
+            related_supporting = frontend_result.get("related_supporting") or [
+                s for s in (frontend_result.get("recommended_standards") or [])
+                if s not in primary_applicable
+            ]
+            needs_verification = frontend_result.get("needs_verification") or []
+            not_applicable = frontend_result.get("not_applicable") or []
+            recommended_standards = frontend_result.get("recommended_standards") or (primary_applicable + related_supporting)
             related_standards = frontend_result.get("related_standards") or []
             normative_standards = frontend_result.get("normative_standards") or []
+            relationship_verifications = frontend_result.get("relationship_verifications") or []
+
+            logger.info(
+                f"[RECOMMENDATION] Primary: {len(primary_applicable)} | "
+                f"Related: {len(related_supporting)} | "
+                f"Needs Verification: {len(needs_verification)} | "
+                f"Not Applicable: {len(not_applicable)}"
+            )
 
             errors: list[dict[str, Any]] = []
             if not recommended_standards:
                 status = "no_results"
-                errors.append({
-                    "stage": "BIS_SEARCH",
-                    "message": "No matching standards were retrieved from the BIS repository."
-                })
+                if candidates_count == 0:
+                    errors.append({
+                        "stage": "BIS_SEARCH",
+                        "message": "No BIS standards were found for the generated product-specific queries."
+                    })
+                elif len(not_applicable) > 0:
+                    errors.append({
+                        "stage": "PRODUCT_COMPATIBILITY",
+                        "message": "BIS returned candidates, but none were sufficiently applicable to the procurement specification."
+                    })
+                else:
+                    errors.append({
+                        "stage": "BIS_SEARCH",
+                        "message": "No matching standards were retrieved from the BIS repository."
+                    })
             else:
                 status = "completed"
 
-            logger.info(f"[OUTPUT] Recommendations: {len(recommended_standards)}")
+            logger.info(f"[OUTPUT] Recommendations: {len(recommended_standards)} (Primary: {len(primary_applicable)})")
             logger.info(f"[ANALYSIS] Completed: {t_total_ms / 1000:.2f}s (Status: {status})")
 
             final_result = {
@@ -708,6 +737,21 @@ class AnalysisPipelineService:
 
                 "input_summary": input_summary,
                 "recommended_standards": recommended_standards,
+                "primary_applicable": primary_applicable,
+                "related_supporting": related_supporting,
+                "needs_verification": needs_verification,
+                "not_applicable": not_applicable,
+
+                # Uppercase Section 2 categories
+                "PRIMARY_APPLICABLE": primary_applicable,
+                "RELATED_SUPPORTING": related_supporting,
+                "NEEDS_VERIFICATION": needs_verification,
+                "NOT_APPLICABLE": not_applicable,
+
+                # Section 3 relationship verifications
+                "relationship_verifications": relationship_verifications,
+                "RELATIONSHIP_VERIFICATIONS": relationship_verifications,
+
                 "related_standards": related_standards,
                 "normative_standards": normative_standards,
 

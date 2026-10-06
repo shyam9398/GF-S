@@ -1,7 +1,11 @@
-from __future__ import annotations
-
+import logging
 import re
 from typing import Any
+
+from app.bis.compatibility_service import BISCompatibilityService
+from app.bis.semantic_service import BISSemanticService
+
+logger = logging.getLogger(__name__)
 
 
 class BISApplicabilityService:
@@ -33,8 +37,14 @@ class BISApplicabilityService:
     def __init__(
         self,
         minimum_direct_score: float = 0.50,
+        semantic_service: BISSemanticService | None = None,
+        compatibility_service: BISCompatibilityService | None = None,
     ):
         self.minimum_direct_score = minimum_direct_score
+        self.semantic_service = semantic_service or BISSemanticService()
+        self.compatibility_service = (
+            compatibility_service or BISCompatibilityService()
+        )
 
     # ------------------------------------------------------------------
     # Generic helpers
@@ -1376,244 +1386,140 @@ class BISApplicabilityService:
         )
 
         # --------------------------------------------------------------
-        # Applicability classification
+        # Step 5 & 6: Semantic similarity and Product Compatibility
         # --------------------------------------------------------------
+        requested_product = (
+            procurement.get("product_name")
+            or procurement.get("product")
+            or ""
+        )
+        standard_title = standard_name or ""
 
-        classification = (
-            self.NEEDS_VERIFICATION
+        # Step 6: Semantic similarity (sentence-transformers embedding cosine similarity)
+        semantic_sim = 0.0
+        try:
+            semantic_sim = self.semantic_service.compute_similarity(
+                procurement_text,
+                [standard_text],
+            )[0]
+        except Exception as exc:
+            logger.warning(f"[SEMANTIC] Error computing semantic similarity: {exc}")
+            semantic_sim = signal.get("semantic_alignment", 0.0)
+
+        logger.info(f"[SEMANTIC] Standard: {standard_number} Similarity score: {semantic_sim:.4f}")
+
+        # Step 5 & 8: Product compatibility determination
+        compatibility, compat_reason = self.compatibility_service.evaluate_compatibility(
+            requested_product,
+            standard_title,
+            standard_scope=standard_text,
+            semantic_similarity=semantic_sim,
+        )
+
+        logger.info(
+            f"[COMPATIBILITY] Requested: '{requested_product}' "
+            f"Candidate: '{standard_number} - {standard_title}' "
+            f"Decision: {compatibility} Reason: {compat_reason}"
+        )
+
+        # --------------------------------------------------------------
+        # Step 7: Product-Centric Scoring Model (Total = 100%)
+        # Product Compatibility: 40%
+        # Semantic Similarity:   25%
+        # Application Match:     15%
+        # Technical Match:       10%
+        # Safety/Material Match: 10%
+        # --------------------------------------------------------------
+        field_alignment = signal.get("field_alignment", {})
+        fields = field_alignment.get("fields", {})
+
+        app_score = fields.get("application", {}).get("score", 0.0)
+        tech_score = fields.get("technical", {}).get("score", 0.0)
+        mat_score = fields.get("material", {}).get("score", 0.0)
+        safety_score = fields.get("safety", {}).get("score", 0.0)
+        safety_mat_score = max(safety_score, mat_score)
+
+        if compatibility == self.compatibility_service.DIRECT_MATCH:
+            product_compat_score = 1.0
+        elif compatibility == self.compatibility_service.RELATED_MATCH:
+            product_compat_score = 0.5
+        elif compatibility == self.compatibility_service.UNKNOWN:
+            product_compat_score = 0.25
+        else:  # MISMATCH
+            product_compat_score = 0.0
+
+        raw_score = (
+            (product_compat_score * 0.40)
+            + (semantic_sim * 0.25)
+            + (app_score * 0.15)
+            + (tech_score * 0.10)
+            + (safety_mat_score * 0.10)
         )
 
         reasons: list[str] = []
 
         if not standard_number:
-            reasons.append(
-                "The candidate has no normalized BIS "
-                "standard number."
-            )
+            reasons.append("The candidate has no normalized BIS standard number.")
 
-        if not self._is_successful(
-            evidence.get("standard")
-        ):
-            reasons.append(
-                "Authoritative BIS standard details "
-                "were not successfully retrieved."
-            )
+        if not self._is_successful(evidence.get("standard")):
+            reasons.append("Authoritative BIS standard details were not successfully retrieved.")
 
-        semantic_alignment = signal[
-            "semantic_alignment"
-        ]
+        # --------------------------------------------------------------
+        # HARD RULE (STEP 7 & 8):
+        # IF product compatibility is MISMATCH:
+        #   classification = "NOT_APPLICABLE"
+        #   Apply strong score penalty / score cap (<= 30%)
+        # --------------------------------------------------------------
+        if compatibility == self.compatibility_service.MISMATCH:
+            classification = self.NOT_APPLICABLE
+            human_classification = "Not Applicable"
+            final_score = min(0.30, raw_score * 0.30)
+            reasons.append(compat_reason)
+            reasons.append("Product mismatch: standard covers a different product domain.")
 
-        field_alignment = signal[
-            "field_alignment"
-        ]
+        elif compatibility == self.compatibility_service.DIRECT_MATCH:
+            reasons.append(compat_reason)
+            reasons.append("The procurement requirements show direct alignment with the BIS standard specification.")
 
-        evidence_confidence = (
-            signal[
-                "evidence_confidence"
-            ]
-        )
+            if raw_score >= 0.65 or semantic_sim >= 0.70:
+                classification = self.DIRECT
+                human_classification = "Highly Applicable"
+                final_score = 0.85 + min(0.12, raw_score * 0.12)
+            else:
+                classification = self.DIRECT
+                human_classification = "Applicable"
+                final_score = 0.72 + min(0.12, raw_score * 0.12)
 
-        strong_product_match = (
-            field_alignment[
-                "fields"
-            ]
-            .get(
-                "product",
-                {},
-            )
-            .get(
-                "score",
-                0.0,
-            )
-            >= 0.45
-        )
-
-        strong_application_match = (
-            field_alignment[
-                "fields"
-            ]
-            .get(
-                "application",
-                {},
-            )
-            .get(
-                "score",
-                0.0,
-            )
-            >= 0.35
-        )
-
-        strong_technical_match = (
-            field_alignment[
-                "fields"
-            ]
-            .get(
-                "technical",
-                {},
-            )
-            .get(
-                "score",
-                0.0,
-            )
-            >= 0.35
-        )
-
-        strong_safety_match = (
-            field_alignment[
-                "fields"
-            ]
-            .get(
-                "safety",
-                {},
-            )
-            .get(
-                "score",
-                0.0,
-            )
-            >= 0.35
-        )
-
-        meaningful_requirement_match = (
-            strong_product_match
-            or strong_application_match
-            or strong_technical_match
-            or strong_safety_match
-        )
-
-        # DIRECT:
-        # Require authoritative BIS details plus a meaningful
-        # procurement-to-standard alignment.
-        if (
-            (semantic_alignment >= self.minimum_direct_score or strong_product_match)
-            and evidence_confidence >= 0.35
-            and meaningful_requirement_match
-            and status.get(
-                "withdraw_status"
-            ) != 1
-        ):
-            classification = self.DIRECT
-
-            if strong_product_match:
-                reasons.append(
-                    "Direct product match: standard scope directly addresses the specified product requirements."
-                )
-
-            reasons.append(
-                "The procurement requirements show strong "
-                "alignment with the BIS standard information."
-            )
-
-            reasons.append(
-                "Authoritative BIS standard details were "
-                "successfully retrieved."
-            )
-
-        # SUPPORTING:
-        # A candidate can be useful because BIS explicitly relates
-        # it to other standards, even when it is not itself the
-        # primary product standard.
-
-        elif relationship_matches:
+        elif compatibility == self.compatibility_service.RELATED_MATCH:
+            reasons.append(compat_reason)
             classification = self.SUPPORTING
+            human_classification = "Related"
+            final_score = 0.40 + min(0.25, raw_score * 0.25)
 
-            reasons.append(
-                "BIS relationship evidence was found, "
-                "but direct applicability was not established."
-            )
+        else:  # UNKNOWN
+            classification = self.NEEDS_VERIFICATION
+            human_classification = "Needs Verification"
+            final_score = raw_score
+            reasons.append("Insufficient evidence to establish direct product applicability.")
 
-            relationship_types = sorted(
-                {
-                    relation.get(
-                        "classification"
-                    )
-                    for relation in relationship_matches
-                    if relation.get(
-                        "classification"
-                    )
-                }
-            )
+        # Withdrawn / Superseded status check
+        if status.get("withdraw_status") == 1:
+            if classification == self.DIRECT:
+                classification = self.NEEDS_VERIFICATION
+                human_classification = "Needs Verification"
+            reasons.append("BIS evidence indicates withdrawal status; current applicability requires verification.")
 
-            if relationship_types:
-                reasons.append(
-                    "Relationship evidence includes: "
-                    + ", ".join(
-                        relationship_types
-                    )
-                    + "."
-                )
+        if status.get("superseded_by"):
+            reasons.append(f"Standard is superseded by {status.get('superseded_by')}; verification required.")
 
-        # POTENTIAL:
-        # Meaningful alignment exists, but it is not strong enough
-        # for direct applicability.
+        score_pct = int(round(final_score * 100))
 
-        elif (
-            semantic_alignment >= 0.30
-            and evidence_confidence >= 0.45
-        ):
-            classification = self.POTENTIAL
+        logger.info(
+            f"[RANKING] Product: {product_compat_score:.2f} Semantic: {semantic_sim:.2f} "
+            f"App: {app_score:.2f} Tech: {tech_score:.2f} Final: {score_pct}% ({human_classification})"
+        )
 
-            reasons.append(
-                "The candidate has partial procurement-to-"
-                "standard alignment."
-            )
-
-            reasons.append(
-                "Additional verification is required before "
-                "treating the standard as directly applicable."
-            )
-
-        else:
-            classification = (
-                self.NEEDS_VERIFICATION
-            )
-
-            reasons.append(
-                "Available evidence and requirement alignment "
-                "are insufficient to establish direct applicability."
-            )
-
-        if semantic_alignment < 0.30:
-            reasons.append(
-                "The measurable procurement-to-standard "
-                "alignment is currently below the applicability "
-                "threshold."
-            )
-
-        if evidence_confidence < 0.45:
-            reasons.append(
-                "Authoritative evidence coverage is incomplete."
-            )
-
-        # Withdrawn standards must never automatically become
-        # current recommendations.
-
-        if status.get(
-            "withdraw_status"
-        ) == 1:
-            classification = (
-                self.NEEDS_VERIFICATION
-            )
-
-            reasons.append(
-                "BIS search/detail evidence indicates "
-                "withdrawal status; current applicability "
-                "requires verification."
-            )
-
-        # Superseded standards also require verification.
-
-        if status.get(
-            "superseded_by"
-        ):
-            classification = (
-                self.NEEDS_VERIFICATION
-            )
-
-            reasons.append(
-                "BIS evidence indicates that this standard "
-                "has a superseding standard; current "
-                "applicability requires verification."
-            )
+        signal["signal_score"] = round(final_score, 4)
 
         return {
             "standard_number": standard_number,
@@ -1621,6 +1527,11 @@ class BISApplicabilityService:
             "standard_name": standard_name,
 
             "classification": classification,
+            "human_classification": human_classification,
+            "applicability_score": score_pct,
+            "compatibility": compatibility,
+            "compat_reason": compat_reason,
+            "semantic_similarity": round(semantic_sim, 4),
 
             "signal": signal,
 

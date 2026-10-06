@@ -599,13 +599,20 @@ class BISRecommendationService:
             )
         )
 
-        score_val = applicability_signal.get("signal_score") or 0.65
-        if classification == BISApplicabilityService.DIRECT:
-            applicability_score_pct = int(round(80 + min(16, score_val * 25)))
-            human_class = "Highly Applicable" if applicability_score_pct >= 85 else "Applicable"
+        if evaluation.get("applicability_score") is not None:
+            applicability_score_pct = int(evaluation["applicability_score"])
+            human_class = evaluation.get("human_classification") or self._human_classification(classification, applicability_score_pct / 100)
         else:
-            applicability_score_pct = int(round(score_val * 100))
-            human_class = self._human_classification(classification, score_val)
+            score_val = applicability_signal.get("signal_score") or 0.65
+            if classification == BISApplicabilityService.DIRECT:
+                applicability_score_pct = int(round(80 + min(16, score_val * 25)))
+                human_class = "Highly Applicable" if applicability_score_pct >= 85 else "Applicable"
+            elif classification == BISApplicabilityService.NOT_APPLICABLE:
+                applicability_score_pct = min(30, int(round(score_val * 100)))
+                human_class = "Not Applicable"
+            else:
+                applicability_score_pct = int(round(score_val * 100))
+                human_class = self._human_classification(classification, score_val)
 
         evidence_list: list[str] = []
         if version.get("published_on"):
@@ -639,6 +646,8 @@ class BISRecommendationService:
 
             "classification": classification,
             "human_classification": human_class,
+            "compatibility": evaluation.get("compatibility") or "UNKNOWN",
+            "semantic_similarity": evaluation.get("semantic_similarity") or 0.0,
 
             "applicability_score": applicability_score_pct,
             "why_recommended": combined_reasons,
@@ -957,6 +966,9 @@ class BISRecommendationService:
                     "amendments": item.get("amendments") or [],
                     "normative_references": item.get("normative_references") or [],
 
+                    "compatibility": item.get("compatibility") or "UNKNOWN",
+                    "semantic_similarity": item.get("semantic_similarity") or 0.0,
+
                     "version_information": item.get(
                         "version_information",
                         {},
@@ -979,6 +991,51 @@ class BISRecommendationService:
                 }
             )
 
+        # Separate into 4 exact categories: PRIMARY_APPLICABLE, RELATED_SUPPORTING, NEEDS_VERIFICATION, NOT_APPLICABLE
+        primary_applicable: list[dict[str, Any]] = []
+        related_supporting: list[dict[str, Any]] = []
+        needs_verification: list[dict[str, Any]] = []
+        not_applicable: list[dict[str, Any]] = []
+
+        for s in frontend_standards:
+            h_class = s.get("human_classification", "")
+            compat = s.get("compatibility", "")
+            classif = s.get("classification", "")
+            score = s.get("applicability_score") or 0
+
+            # Ensure why_recommended is both a list and a string summary
+            why_list = s.get("why_recommended") or s.get("reasons") or []
+            if isinstance(why_list, list) and why_list:
+                s["why_recommended"] = why_list
+                s["why_recommended_summary"] = "; ".join(str(w) for w in why_list)
+            elif isinstance(why_list, str):
+                s["why_recommended"] = [why_list]
+                s["why_recommended_summary"] = why_list
+            else:
+                s["why_recommended"] = ["Standard identified from authoritative BIS retrieval."]
+                s["why_recommended_summary"] = "Standard identified from authoritative BIS retrieval."
+
+            if compat == "MISMATCH" or classif == BISApplicabilityService.NOT_APPLICABLE or h_class in ("Not Applicable", "Low Relevance") or score < 35:
+                not_applicable.append(s)
+            elif compat == "UNKNOWN" or classif == BISApplicabilityService.NEEDS_VERIFICATION or h_class == "Needs Verification" or s.get("verification_required"):
+                needs_verification.append(s)
+            elif h_class == "Highly Applicable" or (classif == BISApplicabilityService.DIRECT and score >= 75):
+                primary_applicable.append(s)
+            else:
+                related_supporting.append(s)
+
+        # Sort all categories in descending applicability order
+        primary_applicable.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
+        related_supporting.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
+        needs_verification.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
+        not_applicable.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
+
+        # Build Engine 3 Relationship Verification for Primary Applicable standards
+        relationship_verifications = [
+            self.build_relationship_verification(p)
+            for p in primary_applicable[:5]
+        ]
+
         # Collect related and normative standards
         all_related = []
         all_normative = []
@@ -994,7 +1051,22 @@ class BISRecommendationService:
             "success": True,
 
             "standards": frontend_standards,
-            "recommended_standards": frontend_standards,
+            "recommended_standards": primary_applicable + related_supporting,
+            "primary_applicable": primary_applicable,
+            "related_supporting": related_supporting,
+            "needs_verification": needs_verification,
+            "not_applicable": not_applicable,
+
+            # Uppercase keys matching Section 2 specification
+            "PRIMARY_APPLICABLE": primary_applicable,
+            "RELATED_SUPPORTING": related_supporting,
+            "NEEDS_VERIFICATION": needs_verification,
+            "NOT_APPLICABLE": not_applicable,
+
+            # Section 3: BIS relationship and evidence verification
+            "relationship_verifications": relationship_verifications,
+            "RELATIONSHIP_VERIFICATIONS": relationship_verifications,
+
             "related_standards": all_related,
             "normative_standards": all_normative,
 
@@ -1019,4 +1091,71 @@ class BISRecommendationService:
             "disclaimer": report.get(
                 "disclaimer"
             ),
+        }
+
+    # ------------------------------------------------------------------
+    # Engine 3: BIS Relationship and Evidence Verification
+    # ------------------------------------------------------------------
+
+    def build_relationship_verification(
+        self,
+        primary_standard: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Identify Normative References, Allied Standards, and Related/Supporting
+        Standards for a primary standard with evidence sources.
+        """
+        related_records = primary_standard.get("related_standards", [])
+        normative_refs: list[dict[str, Any]] = []
+        allied_stds: list[dict[str, Any]] = []
+        related_supporting: list[dict[str, Any]] = []
+
+        for rel in related_records:
+            if not isinstance(rel, dict):
+                continue
+            std_num = rel.get("standard_number") or ""
+            std_title = rel.get("standard_name") or ""
+            rel_type = str(rel.get("relationship_type", "")).upper()
+            src_type = str(rel.get("source_type", "")).upper()
+            evidence_str = f"BIS {src_type or 'CROSS_REFERENCE'} record: {std_num}"
+            evidence_source = "BIS Cross Reference Details"
+            source_url = f"https://www.services.bis.gov.in/php/BIS_2.0/bisconnect/knowyourstandards/knowyourstandards/is_details"
+
+            if "NORMATIVE" in rel_type or "REFERENCE" in rel_type or "CROSS_REFERENCE" in src_type:
+                normative_refs.append({
+                    "standard_number": std_num,
+                    "title": std_title,
+                    "relationship": "NORMATIVE_REFERENCE",
+                    "evidence": evidence_str,
+                    "evidence_source": evidence_source,
+                    "source_url": source_url,
+                })
+            elif "ALLIED" in rel_type or "ASSOCIATED" in rel_type or "CROSS_FOLLOW_REFERENCE" in src_type:
+                allied_stds.append({
+                    "standard_number": std_num,
+                    "title": std_title,
+                    "relationship": "ALLIED_STANDARD",
+                    "evidence": evidence_str,
+                    "evidence_source": evidence_source,
+                    "source_url": source_url,
+                })
+            else:
+                related_supporting.append({
+                    "standard_number": std_num,
+                    "title": std_title,
+                    "relationship": "RELATED_SUPPORTING",
+                    "evidence": evidence_str,
+                    "evidence_source": evidence_source,
+                    "source_url": source_url,
+                })
+
+        return {
+            "primary_standard": {
+                "standard_number": primary_standard.get("standard_number") or "",
+                "title": primary_standard.get("title") or primary_standard.get("standard_name") or "",
+                "applicability_score": primary_standard.get("applicability_score") or 0,
+            },
+            "normative_references": normative_refs,
+            "allied_standards": allied_stds,
+            "related_supporting_standards": related_supporting,
         }

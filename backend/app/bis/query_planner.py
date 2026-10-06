@@ -74,7 +74,95 @@ class BISQueryPlanner:
     @staticmethod
     def _first_n_words(text: str, n: int = 3) -> str:
         words = text.split()
-        return " ".join(words[:n])
+        res = " ".join(words[:n]).strip()
+        while res and res.split()[-1].lower() in {"for", "of", "in", "with", "to", "and", "by"}:
+            words = res.split()[:-1]
+            res = " ".join(words).strip()
+        return res
+
+    GENERIC_TERMS = {
+        "industrial",
+        "safety",
+        "equipment",
+        "protection",
+        "protective",
+        "general",
+        "specification",
+        "standard",
+        "selection",
+        "maintenance",
+        "care",
+        "guide",
+        "guidelines",
+        "commercial",
+        "domestic",
+        "requirements",
+        "grade",
+        "class",
+        "type",
+        "purpose",
+        "use",
+        "heavy",
+        "light",
+        "medium",
+        "supply",
+        "transmission",
+        "distribution",
+        "code",
+        "practice",
+    }
+
+    @classmethod
+    def _extract_product_nouns(cls, product_text: str) -> list[str]:
+        """
+        Extract meaningful product head terms/nouns from product name.
+        Example:
+            'Industrial Safety Helmet' -> ['helmet', 'safety helmet']
+            'Steel Pipe for Drinking Water' -> ['pipe', 'steel pipe']
+        """
+        words = [w.lower() for w in cls._clean_text(product_text).split()]
+        if not words:
+            return []
+
+        # Find words not in generic terms
+        specific_words = [w for w in words if w not in cls.GENERIC_TERMS and len(w) > 2]
+        if not specific_words:
+            # Fall back to the last word
+            return [words[-1]]
+
+        nouns = list(specific_words)
+        # Also include last 2 words if last word is specific
+        if len(words) >= 2 and words[-1] in specific_words:
+            nouns.append(f"{words[-2]} {words[-1]}")
+
+        return nouns
+
+    @classmethod
+    def _is_query_product_centric(cls, query: str, product_nouns: list[str]) -> bool:
+        """
+        Reject queries that contain only generic terms and lack the product noun.
+        """
+        q_words = [w.lower() for w in query.split()]
+        if not q_words:
+            return False
+
+        # Reject if all words are generic
+        if all(w in cls.GENERIC_TERMS for w in q_words):
+            return False
+
+        # If product nouns are identified, query MUST contain at least one product noun or stem
+        if product_nouns:
+            q_text = " ".join(q_words)
+            has_product_term = False
+            for noun in product_nouns:
+                noun_stem = noun[:4] if len(noun) >= 4 else noun
+                if noun in q_text or noun_stem in q_text:
+                    has_product_term = True
+                    break
+            if not has_product_term:
+                return False
+
+        return True
 
     # =========================================================
     # DYNAMIC QUERY GENERATION
@@ -85,8 +173,11 @@ class BISQueryPlanner:
         requirements: dict[str, Any],
     ) -> list[str]:
         """
-        Dynamically generate 3–5 focused search queries from the structured specification.
+        Dynamically generate 3–5 focused, product-centric search queries.
         """
+        import logging
+        logger = logging.getLogger(__name__)
+
         if not isinstance(requirements, dict):
             return []
 
@@ -97,64 +188,59 @@ class BISQueryPlanner:
         )
         product = self._clean_text(product_raw)
 
-        category = self._clean_text(requirements.get("product_category"))
+        # Extract base product by stripping trailing preposition clauses
+        # e.g. "Steel Pipe for Drinking Water" -> "Steel Pipe"
+        base_product = product
+        for prep in [" for ", " of ", " to ", " in ", " with "]:
+            if prep in product.lower():
+                base_product = product[:product.lower().index(prep)].strip()
+                break
+
         application = self._clean_text(
             requirements.get("application") or requirements.get("intended_application")
         )
         materials = self._clean_list(requirements.get("materials"))
-        technical = self._clean_list(
-            requirements.get("technical_specifications")
-            or requirements.get("technical_requirements")
-        )
         keywords = self._clean_list(
             requirements.get("keywords") or requirements.get("search_keywords")
         )
 
+        product_nouns = self._extract_product_nouns(base_product)
+        base_words = base_product.split()
+        core_product_noun = base_words[-1] if base_words else (product_nouns[-1] if product_nouns else "")
+
         candidates: list[str] = []
 
-        # 1. Primary Product Query (clean product phrase, max 3-4 words)
-        if product:
-            candidates.append(self._first_n_words(product, 4))
-            product_words = product.split()
-            # If product name has 3+ words (e.g. "Industrial Safety Helmet"), also add concise 2-word form (e.g. "safety helmet")
-            if len(product_words) >= 3:
-                candidates.append(" ".join(product_words[-2:]))
-                candidates.append(" ".join(product_words[:2]))
-            elif len(product_words) == 2:
-                candidates.append(product_words[-1])  # noun alone, e.g. "helmet"
+        # 1. Base clean product name (e.g. "Steel Pipe", "Industrial Safety Helmet")
+        if base_product:
+            candidates.append(base_product)
 
-        # 2. Product + Key Application or Material (focused 2-3 words)
-        core_product = product_words[-1] if product else ""
-        if len(product_words) >= 2:
-            core_product = " ".join(product_words[-2:])
+        # 2. Short base product phrase (e.g. "Safety Helmet", "Steel Pipe")
+        if len(base_words) >= 2:
+            candidates.append(" ".join(base_words[-2:]))
 
-        if core_product and application:
-            app_words = application.split()
-            if app_words:
-                candidates.append(f"{core_product} {app_words[0]}")
-
-        if core_product and materials:
-            mat_first = materials[0].split()[0] if materials[0].split() else ""
-            if mat_first:
-                candidates.append(f"{mat_first} {core_product}")
-
-        # 3. Product + Key Technical Spec
-        if core_product and technical:
-            tech_words = technical[0].split()
-            if tech_words:
-                candidates.append(f"{core_product} {tech_words[0]}")
-
-        # 4. Top Specification Keywords
-        for kw in keywords[:3]:
+        # 3. Product-specific synonyms from keywords
+        for kw in keywords:
             kw_clean = self._clean_text(kw)
-            if kw_clean and len(kw_clean.split()) <= 3:
-                candidates.append(kw_clean)
+            if kw_clean and self._is_query_product_centric(kw_clean, product_nouns):
+                candidates.append(self._first_n_words(kw_clean, 3))
 
-        # 5. Fallback Category Query if product is sparse
-        if category and not product:
-            candidates.append(self._first_n_words(category, 3))
+        # 4. Product + Key Application (e.g. "Steel Pipe Water", "Helmet Construction")
+        if core_product_noun and application:
+            app_words = [w for w in application.split() if w.lower() not in self.GENERIC_TERMS]
+            if app_words:
+                candidates.append(f"{base_product} {app_words[0].title()}")
 
-        # Filter, normalize and deduplicate
+        # 5. Material + Core Product (e.g. "Steel Pipe", "Polycarbonate Helmet")
+        if core_product_noun and materials:
+            mat_first = materials[0].split()[0] if materials[0].split() else ""
+            if mat_first and mat_first.lower() not in self.GENERIC_TERMS:
+                candidates.append(f"{mat_first.title()} {core_product_noun.title()}")
+
+        # 6. Fallback: Core noun alone (e.g. "Helmet", "Pipe", "Cement")
+        if core_product_noun:
+            candidates.append(core_product_noun.title())
+
+        # Filter, normalize, deduplicate, and enforce product-centricity
         seen: set[str] = set()
         final_queries: list[str] = []
 
@@ -164,10 +250,15 @@ class BISQueryPlanner:
                 continue
             if self._looks_like_standard_identifier(query):
                 continue
-            # Keep query length bounded (maximum 4 words)
+
+            # Length bounded to 3-4 words max
             words = query.split()
             if len(words) > 4:
                 query = " ".join(words[:4])
+
+            # Enforce product-centric filter (STEP 3)
+            if not self._is_query_product_centric(query, product_nouns):
+                continue
 
             norm = query.casefold()
             if norm in seen:
@@ -178,6 +269,7 @@ class BISQueryPlanner:
             if len(final_queries) >= self.max_queries:
                 break
 
+        logger.info(f"[QUERY PLANNER] Generated queries: {final_queries}")
         return final_queries
 
     def build_query_plan(
