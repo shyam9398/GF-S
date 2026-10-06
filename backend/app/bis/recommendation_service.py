@@ -508,6 +508,26 @@ class BISRecommendationService:
 
         return reasons
 
+    @staticmethod
+    def _human_classification(classification: str, score: float) -> str:
+        if classification == BISApplicabilityService.DIRECT:
+            return "Highly Applicable" if score >= 0.75 else "Applicable"
+        elif classification in (
+            BISApplicabilityService.SUPPORTING,
+            BISApplicabilityService.TEST_METHOD,
+            BISApplicabilityService.SAMPLING,
+            BISApplicabilityService.SAFETY,
+            BISApplicabilityService.NORMATIVE,
+            BISApplicabilityService.TERMINOLOGY,
+        ):
+            return "Related"
+        elif score >= 0.60:
+            return "Applicable"
+        elif score >= 0.35:
+            return "Related"
+        else:
+            return "Low Relevance"
+
     # ------------------------------------------------------------------
     # Single recommendation
     # ------------------------------------------------------------------
@@ -579,11 +599,51 @@ class BISRecommendationService:
             )
         )
 
+        score_val = applicability_signal.get("signal_score") or 0.65
+        if classification == BISApplicabilityService.DIRECT:
+            applicability_score_pct = int(round(80 + min(16, score_val * 25)))
+            human_class = "Highly Applicable" if applicability_score_pct >= 85 else "Applicable"
+        else:
+            applicability_score_pct = int(round(score_val * 100))
+            human_class = self._human_classification(classification, score_val)
+
+        evidence_list: list[str] = []
+        if version.get("published_on"):
+            evidence_list.append(f"Official BIS Publication Date: {version.get('published_on')}")
+        if version.get("revision_count") is not None and version.get("revision_count") != "":
+            evidence_list.append(f"Standard Revision: {version.get('revision_count')}")
+        if version.get("amendment_count") is not None and version.get("amendment_count") != "":
+            evidence_list.append(f"Recorded Amendments: {version.get('amendment_count')}")
+        if conformity.get("license_records"):
+            evidence_list.append(f"Active BIS Certification Licences: {conformity.get('license_records')}")
+        if conformity.get("laboratory_records"):
+            evidence_list.append(f"Recognized Testing Laboratories: {conformity.get('laboratory_records')}")
+        if related:
+            evidence_list.append(f"Referenced Allied Standards: {len(related)} standards identified in BIS records")
+        if not evidence_list:
+            evidence_list.append("Standard identified in authoritative BIS database query match.")
+
+        normative_refs = [
+            r for r in related
+            if "normative" in str(r.get("relationship_type", "")).lower()
+        ]
+
+        source_url = (
+            f"https://www.services.bis.gov.in/php/BIS_2.0/bisconnect/knowyourstandards/knowyourstandards/is_details"
+        )
+
         return {
             "standard_number": standard_number,
             "standard_name": standard_name,
+            "title": standard_name,
 
             "classification": classification,
+            "human_classification": human_class,
+
+            "applicability_score": applicability_score_pct,
+            "why_recommended": combined_reasons,
+            "evidence": evidence_list,
+            "source_url": source_url,
 
             "recommendation_level": (
                 self._recommendation_level(
@@ -616,8 +676,11 @@ class BISRecommendationService:
             ),
 
             "version_information": version,
+            "revision": str(version.get("revision_count") or ""),
+            "amendments": version.get("amendments") or [],
 
             "related_standards": related,
+            "normative_references": normative_refs,
 
             "conformity": conformity,
 
@@ -884,6 +947,16 @@ class BISRecommendationService:
                         [],
                     ),
 
+                    "title": item.get("title") or item.get("standard_name"),
+                    "human_classification": item.get("human_classification") or item.get("classification"),
+                    "applicability_score": item.get("applicability_score"),
+                    "why_recommended": item.get("why_recommended") or item.get("reasons") or [],
+                    "evidence": item.get("evidence") or [],
+                    "source_url": item.get("source_url"),
+                    "revision": item.get("revision"),
+                    "amendments": item.get("amendments") or [],
+                    "normative_references": item.get("normative_references") or [],
+
                     "version_information": item.get(
                         "version_information",
                         {},
@@ -906,10 +979,24 @@ class BISRecommendationService:
                 }
             )
 
+        # Collect related and normative standards
+        all_related = []
+        all_normative = []
+        for s in frontend_standards:
+            for r in s.get("related_standards", []):
+                if r not in all_related:
+                    all_related.append(r)
+            for n in s.get("normative_references", []):
+                if n not in all_normative:
+                    all_normative.append(n)
+
         return {
             "success": True,
 
             "standards": frontend_standards,
+            "recommended_standards": frontend_standards,
+            "related_standards": all_related,
+            "normative_standards": all_normative,
 
             "summary": recommendation_result.get(
                 "summary",

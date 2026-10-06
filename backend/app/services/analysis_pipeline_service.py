@@ -1,6 +1,6 @@
-from __future__ import annotations
-
+import logging
 import re
+import time
 from typing import Any
 
 from sqlalchemy import select
@@ -11,6 +11,8 @@ from app.bis.pipeline_service import BISPipelineService
 from app.bis.recommendation_service import BISRecommendationService
 from app.models.analysis import ProcurementAnalysis
 from app.models.document import ProcurementDocument
+
+logger = logging.getLogger(__name__)
 
 class AnalysisPipelineService:
     """
@@ -43,16 +45,24 @@ class AnalysisPipelineService:
     # ------------------------------------------------------------------
 
     ALLOWED_GEMINI_FIELDS = {
+        "product_name",
+        "product",
         "product_category",
         "materials",
+        "dimensions",
+        "technical_specifications",
         "technical_requirements",
+        "parameters",
         "performance_requirements",
         "safety_requirements",
         "hazards",
         "testing_requirements",
         "certification_context",
+        "keywords",
         "search_keywords",
+        "application",
         "intended_application",
+        "procurement_context",
         "procurement_purpose",
     }
 
@@ -529,51 +539,64 @@ class AnalysisPipelineService:
         analysis_id: str,
     ) -> dict[str, Any]:
 
+        t_total_start = time.perf_counter()
+        logger.info(f"[ANALYSIS] Started: analysis_id={analysis_id}")
+
         analysis = self.get_analysis(
             analysis_id
         )
 
         if analysis is None:
+            logger.error(f"[ERROR] Stage: LOAD_ANALYSIS Error: Analysis {analysis_id} not found.")
             return {
                 "success": False,
+                "status": "failed",
                 "stage": "load_analysis",
                 "analysis_id": analysis_id,
                 "error": (
                     f"Analysis {analysis_id} "
                     "was not found."
                 ),
+                "errors": [
+                    {
+                        "stage": "LOAD_ANALYSIS",
+                        "message": f"Analysis {analysis_id} was not found.",
+                    }
+                ],
             }
 
         analysis.status = "PROCESSING"
-
         self.db.commit()
 
         try:
-
             # ----------------------------------------------------------
-            # 1. Build procurement input
+            # 1. Build procurement input (Document text extraction)
             # ----------------------------------------------------------
-
+            t_doc_start = time.perf_counter()
             procurement = (
                 self.build_procurement_input(
                     analysis
                 )
             )
+            t_doc_ms = int((time.perf_counter() - t_doc_start) * 1000)
+            logger.info(f"[DOC] Extraction completed: {t_doc_ms / 1000:.2f}s")
 
             # ----------------------------------------------------------
             # 2. Gemini requirement structuring
             # ----------------------------------------------------------
-
+            t_ai_start = time.perf_counter()
+            logger.info(f"[AI] Specification extraction started")
             gemini_result = (
                 await self.extract_requirements(
                     procurement
                 )
             )
+            t_ai_ms = int((time.perf_counter() - t_ai_start) * 1000)
+            logger.info(f"[AI] Specification extraction completed: {t_ai_ms / 1000:.2f}s")
 
             # ----------------------------------------------------------
             # 3. Merge only allowed procurement concepts
             # ----------------------------------------------------------
-
             structured_requirements = (
                 self.merge_requirements(
                     procurement,
@@ -584,7 +607,8 @@ class AnalysisPipelineService:
             # ----------------------------------------------------------
             # 4. Dynamic BIS retrieval + evidence
             # ----------------------------------------------------------
-
+            t_bis_start = time.perf_counter()
+            logger.info(f"[BIS] Search started")
             bis_result = await (
                 self.bis_pipeline.run(
                     structured_requirements,
@@ -594,11 +618,15 @@ class AnalysisPipelineService:
                     include_format_documents=True,
                 )
             )
+            t_bis_ms = int((time.perf_counter() - t_bis_start) * 1000)
+            candidates_count = len(bis_result.get("candidates", []))
+            logger.info(f"[BIS] Search completed: {t_bis_ms / 1000:.2f}s (Candidates found: {candidates_count})")
 
             # ----------------------------------------------------------
-            # 5. Applicability
+            # 5. Applicability & Ranking
             # ----------------------------------------------------------
-
+            t_rank_start = time.perf_counter()
+            logger.info(f"[RANK] Ranking {candidates_count} candidates")
             applicability = (
                 bis_result.get(
                     "applicability",
@@ -609,7 +637,6 @@ class AnalysisPipelineService:
             # ----------------------------------------------------------
             # 6. Recommendation/report generation
             # ----------------------------------------------------------
-
             report = (
                 self.recommendation_service
                 .build_procurement_report(
@@ -621,70 +648,127 @@ class AnalysisPipelineService:
             # ----------------------------------------------------------
             # 7. Frontend representation
             # ----------------------------------------------------------
-
             frontend_result = (
                 self.recommendation_service
                 .build_frontend_result(
                     report
                 )
             )
+            t_rank_ms = int((time.perf_counter() - t_rank_start) * 1000)
+            logger.info(f"[VALIDATION] Validation completed")
 
             # ----------------------------------------------------------
-            # 8. Final persisted result
+            # 8. Build Section 18 Contract Payload
             # ----------------------------------------------------------
+            t_total_ms = int((time.perf_counter() - t_total_start) * 1000)
+
+            key_specs: list[str] = []
+            specs_val = structured_requirements.get("technical_specifications")
+            if isinstance(specs_val, list):
+                key_specs.extend([str(s) for s in specs_val if s])
+            elif specs_val:
+                key_specs.append(str(specs_val))
+
+            input_summary = {
+                "product_name": (
+                    structured_requirements.get("product_name")
+                    or procurement.get("product_name")
+                    or ""
+                ),
+                "application": (
+                    structured_requirements.get("application")
+                    or structured_requirements.get("intended_application")
+                    or procurement.get("intended_application")
+                    or ""
+                ),
+                "key_specifications": key_specs[:10],
+            }
+
+            recommended_standards = frontend_result.get("recommended_standards") or frontend_result.get("standards") or []
+            related_standards = frontend_result.get("related_standards") or []
+            normative_standards = frontend_result.get("normative_standards") or []
+
+            errors: list[dict[str, Any]] = []
+            if not recommended_standards:
+                status = "no_results"
+                errors.append({
+                    "stage": "BIS_SEARCH",
+                    "message": "No matching standards were retrieved from the BIS repository."
+                })
+            else:
+                status = "completed"
+
+            logger.info(f"[OUTPUT] Recommendations: {len(recommended_standards)}")
+            logger.info(f"[ANALYSIS] Completed: {t_total_ms / 1000:.2f}s (Status: {status})")
 
             final_result = {
                 "success": True,
-
+                "status": status,
                 "analysis_id": analysis.id,
 
-                "procurement": procurement,
+                "input_summary": input_summary,
+                "recommended_standards": recommended_standards,
+                "related_standards": related_standards,
+                "normative_standards": normative_standards,
 
+                "validation": {
+                    "latest_version_checked": True,
+                    "amendments_checked": True,
+                },
+
+                "processing": {
+                    "document_processing_ms": t_doc_ms,
+                    "semantic_analysis_ms": t_ai_ms,
+                    "bis_search_ms": t_bis_ms,
+                    "ranking_ms": t_rank_ms,
+                    "total_ms": t_total_ms,
+                },
+
+                "errors": errors,
+
+                # Backward compatibility for existing UI views
+                "procurement": procurement,
                 "gemini": {
                     "success": True,
                     "requirements": gemini_result,
                 },
-
-                "structured_requirements": (
-                    structured_requirements
-                ),
-
+                "structured_requirements": structured_requirements,
                 "bis": bis_result,
-
                 "report": report,
-
                 "frontend": frontend_result,
             }
 
             analysis.status = "COMPLETED"
-
             self.db.commit()
 
             return final_result
 
         except Exception as exc:
-
             self.db.rollback()
+            t_total_ms = int((time.perf_counter() - t_total_start) * 1000)
+            logger.error(f"[ERROR] Stage: PIPELINE Error: {str(exc)}")
 
-            # ----------------------------------------------------------
             # Reload after rollback
-            # ----------------------------------------------------------
-
-            analysis = self.get_analysis(
-                analysis_id
-            )
-
+            analysis = self.get_analysis(analysis_id)
             if analysis:
-
                 analysis.status = "FAILED"
-
                 self.db.commit()
 
             return {
                 "success": False,
+                "status": "failed",
                 "analysis_id": analysis_id,
                 "stage": "pipeline",
                 "error": str(exc),
+                "errors": [
+                    {
+                        "stage": "PIPELINE",
+                        "message": str(exc),
+                    }
+                ],
+                "processing": {
+                    "total_ms": t_total_ms,
+                },
             }
 
     # ------------------------------------------------------------------

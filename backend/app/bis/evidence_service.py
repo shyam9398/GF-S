@@ -35,7 +35,7 @@ class BISEvidenceService:
         self,
         provider: BISWebProvider | None = None,
         document_service: BISDocumentService | None = None,
-        max_concurrency: int = 4,
+        max_concurrency: int = 6,
     ):
         self.provider = (
             provider
@@ -690,6 +690,7 @@ class BISEvidenceService:
             self._get_detail_encrypted_id(
                 detail_data
             )
+            or search_encrypted_id
         )
 
         if not detail_encrypted_id:
@@ -930,6 +931,9 @@ class BISEvidenceService:
                 "results": [],
             }
 
+        target_candidates = candidates[:10]
+        remaining_candidates = candidates[10:]
+
         tasks = [
             asyncio.create_task(
                 self.enrich_candidate(
@@ -948,7 +952,7 @@ class BISEvidenceService:
                     ),
                 )
             )
-            for candidate in candidates
+            for candidate in target_candidates
         ]
 
         results = await asyncio.gather(
@@ -961,7 +965,7 @@ class BISEvidenceService:
         ] = []
 
         for candidate, result in zip(
-            candidates,
+            target_candidates,
             results,
         ):
             if isinstance(
@@ -996,6 +1000,17 @@ class BISEvidenceService:
                 normalized_results.append(
                     result
                 )
+
+        for candidate in remaining_candidates:
+            normalized_results.append({
+                "candidate": candidate,
+                "evidence": {
+                    "standard_number": self._get_standard_number(candidate),
+                    "errors": [],
+                },
+                "success": True,
+                "partial_evidence": True,
+            })
 
         successful = sum(
             1

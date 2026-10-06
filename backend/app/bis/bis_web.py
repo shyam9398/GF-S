@@ -1,5 +1,6 @@
 from typing import Any
 
+# pyrefly: ignore [missing-import]
 import httpx
 
 from app.bis.base import BISRetrievalProvider
@@ -86,11 +87,13 @@ class BISWebProvider(BISRetrievalProvider):
     # INITIALIZE HTTP CLIENT
     # =========================================================
 
-    def __init__(self):
+    def __init__(self, timeout: float = 15.0):
+        self.timeout = timeout
         self.client = httpx.AsyncClient(
-            timeout=30.0,
+            timeout=timeout,
             follow_redirects=True,
         )
+        self._search_cache: dict[str, list[dict[str, Any]]] = {}
 
     # =========================================================
     # COMMON POST HELPER
@@ -129,8 +132,22 @@ class BISWebProvider(BISRetrievalProvider):
         if not query or not query.strip():
             return []
 
+        cleaned_query = query.strip()
+        cache_key = cleaned_query.casefold()
+
+        # Cache check
+        if cache_key in self._search_cache:
+            cached = self._search_cache[cache_key]
+            print(f"[BIS] Reusing cached search for query: '{cleaned_query}' ({len(cached)} records)")
+            return cached
+
+        print(f"[BIS] Request started")
+        print(f"[BIS] URL: {self.SEARCH_URL}")
+        print(f"[BIS] Method: POST")
+        print(f"[BIS] Query: {cleaned_query}")
+
         payload = {
-            "searchText": query.strip(),
+            "searchText": cleaned_query,
             "token": None,
             "refreshToken": None,
             "clientId": None,
@@ -138,24 +155,53 @@ class BISWebProvider(BISRetrievalProvider):
             "sub": None,
         }
 
-        result = await self._post_json(
-            self.SEARCH_URL,
-            payload,
-        )
+        try:
+            response = await self.client.post(
+                self.SEARCH_URL,
+                json=payload,
+            )
 
-        if result.get("status") != "SUCCESS":
+            print(f"[BIS] Response status: {response.status_code}")
+            print(f"[BIS] Response received")
+
+            if response.status_code != 200:
+                print(f"[BIS] Non-200 response: {response.status_code}")
+                return []
+
+            result = response.json()
+            if not isinstance(result, dict):
+                return []
+
+            if result.get("status") != "SUCCESS":
+                print(f"[BIS] Query returned 0 results: status={result.get('status')}")
+                self._search_cache[cache_key] = []
+                return []
+
+            data = result.get("data", [])
+
+            if not isinstance(data, list):
+                print(f"[BIS] Query returned 0 results")
+                self._search_cache[cache_key] = []
+                return []
+
+            records = [
+                item
+                for item in data
+                if isinstance(item, dict)
+            ]
+
+            print(f"[BIS] Results count: {len(records)}")
+            print(f"[BIS] Parsing completed")
+
+            if not records:
+                print(f"[BIS] Query returned 0 results")
+
+            self._search_cache[cache_key] = records
+            return records
+
+        except Exception as exc:
+            print(f"[BIS] Error during search for '{cleaned_query}': {exc}")
             return []
-
-        data = result.get("data", [])
-
-        if not isinstance(data, list):
-            return []
-
-        return [
-            item
-            for item in data
-            if isinstance(item, dict)
-        ]
 
     # =========================================================
     # GET STANDARD DETAILS
@@ -777,7 +823,7 @@ class BISWebProvider(BISRetrievalProvider):
     async def _get_all_paginated_records(
         self,
         fetch_page,
-        max_pages: int = 100,
+        max_pages: int = 1,
     ) -> list[dict[str, Any]]:
 
         all_records: list[dict[str, Any]] = []

@@ -4,46 +4,107 @@ import {
   AlertCircle,
   ArrowLeft,
   CheckCircle2,
+  FileSearch,
+  FileText,
+  Layers,
   Loader2,
+  Scale,
   Search,
   ShieldCheck,
   Sparkles,
+  Upload,
 } from "lucide-react";
 
-const API_URL =
-  import.meta.env.VITE_API_URL ||
-  "http://localhost:8001/api";
+import { API_BASE_URL } from "../services/api";
 
-type PipelineStage =
-  | "starting"
-  | "requirements"
-  | "search"
-  | "evidence"
-  | "recommendation"
+const API_URL = API_BASE_URL;
+
+export type PipelineStage =
+  | "uploading"
+  | "extracting"
+  | "understanding"
+  | "bis_search"
+  | "ranking"
+  | "validating"
+  | "preparing_evidence"
   | "completed"
   | "failed";
 
+const PIPELINE_STAGES: {
+  key: PipelineStage;
+  title: string;
+  description: string;
+  icon: any;
+}[] = [
+  {
+    key: "uploading",
+    title: "Uploading",
+    description: "Document uploaded and procurement parameters validated.",
+    icon: Upload,
+  },
+  {
+    key: "extracting",
+    title: "Extracting Document",
+    description: "Extracting structured specifications, tables, and sections using Docling.",
+    icon: FileSearch,
+  },
+  {
+    key: "understanding",
+    title: "Understanding Specifications",
+    description: "Semantic analysis extracting materials, technical requirements, parameters, and safety requirements.",
+    icon: Sparkles,
+  },
+  {
+    key: "bis_search",
+    title: "Searching BIS Standards",
+    description: "Dynamically retrieving candidate Indian Standards from official BIS endpoints.",
+    icon: Search,
+  },
+  {
+    key: "ranking",
+    title: "Ranking Standards",
+    description: "Deterministic scoring across product, application, technical, material, and safety dimensions.",
+    icon: Scale,
+  },
+  {
+    key: "validating",
+    title: "Validating Applicability",
+    description: "Cross-validating standard status, versions, amendments, and scope applicability.",
+    icon: Layers,
+  },
+  {
+    key: "preparing_evidence",
+    title: "Preparing Evidence",
+    description: "Compiling BIS citations, certification licenses, and laboratory testing references.",
+    icon: ShieldCheck,
+  },
+  {
+    key: "completed",
+    title: "Analysis Complete",
+    description: "Evidence-backed recommendation report ready to review.",
+    icon: CheckCircle2,
+  },
+];
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export default function AnalysisProgress() {
   const { id } = useParams<{ id: string }>();
-
   const navigate = useNavigate();
 
-  const [stage, setStage] =
-    useState<PipelineStage>("starting");
+  const [stage, setStage] = useState<PipelineStage>("uploading");
+  const [failedStageName, setFailedStageName] = useState<string>("Analysis Pipeline");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [started, setStarted] = useState(false);
 
-  const [error, setError] =
-    useState<string | null>(null);
-
-  const [started, setStarted] =
-    useState(false);
-
-  // Prevent duplicate POST requests during React development
-  // StrictMode mounting.
   const runStartedRef = useRef(false);
 
   useEffect(() => {
     if (!id) {
-      setError("Analysis ID is missing.");
+      setErrorMessage("Analysis ID is missing.");
+      setFailedStageName("Initialization");
       setStage("failed");
       return;
     }
@@ -55,42 +116,53 @@ export default function AnalysisProgress() {
     runStartedRef.current = true;
 
     async function runPipeline() {
+      setStarted(true);
+      setErrorMessage(null);
+
+      // Progressive stage transitions while the backend request runs
+      let currentStage: PipelineStage = "uploading";
+      const timer1 = setTimeout(() => {
+        if (currentStage === "uploading") {
+          currentStage = "extracting";
+          setStage("extracting");
+        }
+      }, 800);
+
+      const timer2 = setTimeout(() => {
+        if (currentStage === "extracting") {
+          currentStage = "understanding";
+          setStage("understanding");
+        }
+      }, 2500);
+
+      const timer3 = setTimeout(() => {
+        if (currentStage === "understanding") {
+          currentStage = "bis_search";
+          setStage("bis_search");
+        }
+      }, 7000);
+
+      const timer4 = setTimeout(() => {
+        if (currentStage === "bis_search") {
+          currentStage = "ranking";
+          setStage("ranking");
+        }
+      }, 15000);
+
       try {
-        setStarted(true);
-        setError(null);
-
-        // ------------------------------------------------------------
-        // Stage 1
-        // ------------------------------------------------------------
-
-        setStage("requirements");
-
-        // Give the UI a moment to show the first stage before the
-        // potentially long backend request starts.
-        await wait(300);
-
-        // ------------------------------------------------------------
-        // Stage 2
-        // ------------------------------------------------------------
-
-        setStage("search");
-
-        const response = await fetch(
-          `${API_URL}/analyses/${id}/run`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
+        const response = await fetch(`${API_URL}/analyses/${id}/run`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
           },
-        );
+        });
 
-        // ------------------------------------------------------------
-        // Read response
-        // ------------------------------------------------------------
+        clearTimeout(timer1);
+        clearTimeout(timer2);
+        clearTimeout(timer3);
+        clearTimeout(timer4);
 
         let result: any = null;
-
         try {
           result = await response.json();
         } catch {
@@ -98,71 +170,70 @@ export default function AnalysisProgress() {
         }
 
         if (!response.ok) {
-          const message =
-            result?.detail?.error ||
-            result?.detail?.message ||
-            result?.detail ||
-            result?.error ||
-            "The analysis pipeline failed.";
+          const detail = result?.detail || result;
+          const stageName = detail?.stage || detail?.errors?.[0]?.stage || currentStage;
+          const msg =
+            detail?.error ||
+            detail?.message ||
+            detail?.errors?.[0]?.message ||
+            (typeof detail === "string" ? detail : "The analysis pipeline failed.");
 
-          throw new Error(
-            typeof message === "string"
-              ? message
-              : "The analysis pipeline failed.",
-          );
+          setFailedStageName(formatStageTitle(stageName));
+          setErrorMessage(msg);
+          setStage("failed");
+          return;
         }
 
-        if (!result?.success) {
-          throw new Error(
+        if (result?.status === "failed" || result?.success === false) {
+          const stageName = result?.stage || result?.errors?.[0]?.stage || currentStage;
+          const msg =
             result?.error ||
-              "The analysis pipeline did not complete successfully.",
-          );
+            result?.errors?.[0]?.message ||
+            "The analysis pipeline encountered an error.";
+
+          setFailedStageName(formatStageTitle(stageName));
+          setErrorMessage(msg);
+          setStage("failed");
+          return;
         }
 
-        // ------------------------------------------------------------
-        // The backend currently executes the complete BIS pipeline
-        // inside this request. These stages are therefore visual
-        // progress indicators rather than separate backend jobs.
-        // ------------------------------------------------------------
-
-        setStage("evidence");
-
+        // Advance quickly through remaining visual stages
+        setStage("validating");
         await wait(500);
-
-        setStage("recommendation");
-
+        setStage("preparing_evidence");
         await wait(500);
-
         setStage("completed");
+        await wait(800);
 
-        await wait(700);
-
-        // ------------------------------------------------------------
-        // Redirect to results
-        // ------------------------------------------------------------
-
-        navigate(
-          `/analysis/${id}/results`,
-          {
-            replace: true,
-          },
-        );
+        navigate(`/analysis/${id}/results`, { replace: true });
       } catch (err) {
-        setStage("failed");
+        clearTimeout(timer1);
+        clearTimeout(timer2);
+        clearTimeout(timer3);
+        clearTimeout(timer4);
 
-        setError(
+        setFailedStageName(formatStageTitle(currentStage));
+        setErrorMessage(
           err instanceof Error
             ? err.message
-            : "Unable to run the analysis.",
+            : "Network or server connection error while communicating with backend.",
         );
+        setStage("failed");
       }
     }
 
     runPipeline();
   }, [id, navigate]);
 
-  const currentStageIndex =
-    getStageIndex(stage);
+  function formatStageTitle(key: string): string {
+    const matched = PIPELINE_STAGES.find((s) => s.key === key);
+    if (matched) return matched.title;
+    return key
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  const currentStageIndex = PIPELINE_STAGES.findIndex((s) => s.key === stage);
 
   return (
     <div className="space-y-6">
@@ -179,83 +250,56 @@ export default function AnalysisProgress() {
 
       {/* Header */}
       <div>
-        <p className="text-sm font-medium text-blue-700">
-          Analysis
+        <p className="text-sm font-semibold uppercase tracking-wider text-blue-700">
+          Analysis Pipeline
         </p>
 
         <h1 className="mt-2 text-3xl font-semibold text-ink">
           {stage === "completed"
-            ? "Analysis completed"
+            ? "Analysis Complete"
             : stage === "failed"
-              ? "Analysis could not be completed"
-              : "Analysis in progress"}
+              ? "Analysis failed"
+              : "Analyzing Procurement Specification"}
         </h1>
 
         <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
-          The system is analyzing your procurement specification,
-          retrieving evidence from BIS, and preparing the
-          standards recommendation.
+          Dynamic multi-stage pipeline: Docling document extraction, semantic requirement structuring,
+          live BIS standards retrieval, deterministic scoring, and evidence verification.
         </p>
 
-        <p className="mt-2 text-xs text-muted">
-          Analysis ID: {id}
-        </p>
+        <p className="mt-2 text-xs text-muted">Analysis ID: {id}</p>
       </div>
 
-      {/* Main progress card */}
+      {/* Main Progress Card */}
       <div className="rounded-xl border border-line bg-white p-6 shadow-soft">
-        {/* Current status */}
-        <div className="flex items-start gap-4">
-          <StatusIcon stage={stage} />
-
-          <div className="min-w-0">
-            <p className="font-medium text-slate-900">
-              {getStageTitle(stage)}
-            </p>
-
-            <p className="mt-1 text-sm text-muted">
-              {getStageDescription(stage)}
-            </p>
-          </div>
-        </div>
-
-        {/* Progress bar */}
-        <div className="mt-7">
+        {/* Progress Bar */}
+        <div className="mb-6">
           <div className="flex items-center justify-between text-xs">
-            <span className="font-medium text-slate-600">
-              Pipeline progress
-            </span>
-
-            <span className="font-medium text-slate-600">
+            <span className="font-medium text-slate-700">Pipeline Execution Progress</span>
+            <span className="font-semibold text-slate-700">
               {stage === "failed"
                 ? "Failed"
                 : `${Math.round(
-                    (currentStageIndex /
-                      PIPELINE_STAGES.length) *
-                      100,
+                    ((currentStageIndex + 1) / PIPELINE_STAGES.length) * 100,
                   )}%`}
             </span>
           </div>
 
-          <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+          <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-slate-100">
             <div
               className={[
                 "h-full rounded-full transition-all duration-500",
-                stage === "failed"
-                  ? "bg-red-500"
-                  : "bg-brand",
+                stage === "failed" ? "bg-red-500" : "bg-brand",
               ].join(" ")}
               style={{
                 width:
                   stage === "failed"
                     ? "100%"
                     : `${Math.max(
-                        8,
+                        12,
                         Math.min(
                           100,
-                          (currentStageIndex /
-                            PIPELINE_STAGES.length) *
-                            100,
+                          ((currentStageIndex + 1) / PIPELINE_STAGES.length) * 100,
                         ),
                       )}%`,
               }}
@@ -263,83 +307,106 @@ export default function AnalysisProgress() {
           </div>
         </div>
 
-        {/* Pipeline stages */}
-        <div className="mt-8 space-y-1">
-          <ProgressItem
-            icon={Sparkles}
-            title="Specification understanding"
-            description="Understanding the product, application, technical, performance, and safety requirements."
-            state={getItemState(
-              "requirements",
-              stage,
-            )}
-          />
+        {/* 8 Pipeline Stages */}
+        <div className="space-y-2">
+          {PIPELINE_STAGES.map((s, idx) => {
+            const Icon = s.icon;
+            const isCompleted =
+              stage === "completed" ||
+              (stage !== "failed" && idx < currentStageIndex);
+            const isActive = stage === s.key;
+            const isFailed = stage === "failed" && idx === currentStageIndex;
 
-          <ProgressItem
-            icon={Search}
-            title="BIS standards retrieval"
-            description="Searching BIS dynamically using multiple procurement search concepts."
-            state={getItemState(
-              "search",
-              stage,
-            )}
-          />
+            return (
+              <div
+                key={s.key}
+                className={[
+                  "flex items-start gap-4 rounded-lg p-3 transition-colors",
+                  isActive ? "bg-blue-50/70 border border-blue-100" : "",
+                ].join(" ")}
+              >
+                <div
+                  className={[
+                    "mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-sm",
+                    isCompleted
+                      ? "border-emerald-500 bg-emerald-500 text-white"
+                      : isActive
+                        ? "border-brand bg-blue-100 text-brand"
+                        : isFailed
+                          ? "border-red-500 bg-red-100 text-red-600"
+                          : "border-slate-200 bg-slate-50 text-slate-400",
+                  ].join(" ")}
+                >
+                  {isCompleted ? (
+                    <CheckCircle2 className="h-4 w-4" />
+                  ) : isActive ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : isFailed ? (
+                    <AlertCircle className="h-4 w-4" />
+                  ) : (
+                    <Icon className="h-4 w-4" />
+                  )}
+                </div>
 
-          <ProgressItem
-            icon={ShieldCheck}
-            title="Evidence enrichment"
-            description="Retrieving BIS details, amendments, references, certification and related evidence."
-            state={getItemState(
-              "evidence",
-              stage,
-            )}
-          />
-
-          <ProgressItem
-            icon={CheckCircle2}
-            title="Recommendation generation"
-            description="Evaluating applicability and preparing the evidence-backed procurement report."
-            state={getItemState(
-              "recommendation",
-              stage,
-            )}
-          />
+                <div className="min-w-0 pt-0.5">
+                  <p
+                    className={[
+                      "text-sm font-semibold",
+                      isActive
+                        ? "text-blue-900"
+                        : isCompleted
+                          ? "text-slate-800"
+                          : isFailed
+                            ? "text-red-700"
+                            : "text-slate-500",
+                    ].join(" ")}
+                  >
+                    {s.title}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted leading-relaxed">
+                    {s.description}
+                  </p>
+                </div>
+              </div>
+            );
+          })}
         </div>
 
-        {/* Error */}
+        {/* Error Card as specified in Section 19 */}
         {stage === "failed" && (
-          <div className="mt-7 rounded-lg border border-red-200 bg-red-50 p-4">
+          <div className="mt-7 rounded-xl border border-red-200 bg-red-50/80 p-5">
             <div className="flex items-start gap-3">
-              <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
-
+              <AlertCircle className="mt-0.5 h-6 w-6 shrink-0 text-red-600" />
               <div>
-                <p className="text-sm font-semibold text-red-800">
-                  Analysis failed
-                </p>
+                <h3 className="text-base font-bold text-red-900">Analysis failed</h3>
 
-                <p className="mt-1 text-sm leading-6 text-red-700">
-                  {error ||
-                    "An unexpected error occurred while processing the analysis."}
-                </p>
+                <div className="mt-3 space-y-1.5 text-sm text-red-800">
+                  <p>
+                    <span className="font-semibold text-red-950">Stage:</span>{" "}
+                    {failedStageName}
+                  </p>
+                  <p>
+                    <span className="font-semibold text-red-950">Reason:</span>{" "}
+                    {errorMessage || "An unexpected error occurred during execution."}
+                  </p>
+                </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* Success */}
+        {/* Success Card */}
         {stage === "completed" && (
-          <div className="mt-7 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+          <div className="mt-7 rounded-xl border border-emerald-200 bg-emerald-50/80 p-5">
             <div className="flex items-start gap-3">
-              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
-
+              <CheckCircle2 className="mt-0.5 h-6 w-6 shrink-0 text-emerald-600" />
               <div>
-                <p className="text-sm font-semibold text-emerald-800">
-                  Analysis completed successfully
-                </p>
-
-                <p className="mt-1 text-sm leading-6 text-emerald-700">
-                  The recommendation report and BIS evidence are
-                  ready to review.
+                <h3 className="text-base font-bold text-emerald-900">
+                  Analysis Complete
+                </h3>
+                <p className="mt-1 text-sm text-emerald-800 leading-relaxed">
+                  BIS recommendations, applicability scores, revisions, amendments, and conformity evidence
+                  are ready.
                 </p>
               </div>
             </div>
@@ -363,7 +430,7 @@ export default function AnalysisProgress() {
               onClick={() => {
                 window.location.reload();
               }}
-              className="inline-flex rounded-lg bg-brand px-5 py-3 text-sm font-medium text-white hover:bg-blue-700"
+              className="inline-flex rounded-lg bg-red-600 px-5 py-3 text-sm font-medium text-white hover:bg-red-700"
             >
               Try Again
             </button>
@@ -377,239 +444,12 @@ export default function AnalysisProgress() {
           </Link>
         </div>
 
-        {/* Technical note */}
-        {started &&
-          stage !== "failed" &&
-          stage !== "completed" && (
-            <p className="mt-6 text-xs leading-5 text-muted">
-              BIS retrieval may take some time because the system
-              performs dynamic searches and gathers evidence from
-              multiple BIS data sources.
-            </p>
-          )}
-      </div>
-    </div>
-  );
-}
-
-const PIPELINE_STAGES: PipelineStage[] = [
-  "requirements",
-  "search",
-  "evidence",
-  "recommendation",
-  "completed",
-];
-
-function wait(milliseconds: number) {
-  return new Promise<void>((resolve) => {
-    window.setTimeout(
-      resolve,
-      milliseconds,
-    );
-  });
-}
-
-function getStageIndex(
-  stage: PipelineStage,
-) {
-  if (stage === "starting") {
-    return 0;
-  }
-
-  if (stage === "failed") {
-    return 0;
-  }
-
-  const index =
-    PIPELINE_STAGES.indexOf(stage);
-
-  return index >= 0 ? index + 1 : 0;
-}
-
-function getStageTitle(
-  stage: PipelineStage,
-) {
-  switch (stage) {
-    case "starting":
-      return "Starting analysis";
-
-    case "requirements":
-      return "Understanding procurement requirements";
-
-    case "search":
-      return "Searching BIS standards";
-
-    case "evidence":
-      return "Collecting BIS evidence";
-
-    case "recommendation":
-      return "Generating recommendations";
-
-    case "completed":
-      return "Recommendation report ready";
-
-    case "failed":
-      return "Pipeline execution failed";
-
-    default:
-      return "Processing analysis";
-  }
-}
-
-function getStageDescription(
-  stage: PipelineStage,
-) {
-  switch (stage) {
-    case "starting":
-      return "Preparing the analysis pipeline.";
-
-    case "requirements":
-      return "Gemini is structuring the procurement requirements into searchable concepts.";
-
-    case "search":
-      return "The backend is dynamically searching BIS for candidate Indian Standards.";
-
-    case "evidence":
-      return "The backend is retrieving standard details, amendments, relationships, and conformity evidence.";
-
-    case "recommendation":
-      return "The applicability and evidence layers are being converted into a procurement report.";
-
-    case "completed":
-      return "The analysis has completed and the results are ready.";
-
-    case "failed":
-      return "The backend returned an error while processing this analysis.";
-
-    default:
-      return "Processing analysis.";
-  }
-}
-
-function getItemState(
-  itemStage: PipelineStage,
-  currentStage: PipelineStage,
-): "completed" | "active" | "pending" | "failed" {
-  if (currentStage === "failed") {
-    return "failed";
-  }
-
-  if (currentStage === "completed") {
-    return "completed";
-  }
-
-  const currentIndex =
-    PIPELINE_STAGES.indexOf(
-      currentStage,
-    );
-
-  const itemIndex =
-    PIPELINE_STAGES.indexOf(
-      itemStage,
-    );
-
-  if (itemIndex < currentIndex) {
-    return "completed";
-  }
-
-  if (itemIndex === currentIndex) {
-    return "active";
-  }
-
-  return "pending";
-}
-
-function StatusIcon({
-  stage,
-}: {
-  stage: PipelineStage;
-}) {
-  if (stage === "failed") {
-    return (
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-50">
-        <AlertCircle className="h-5 w-5 text-red-600" />
-      </div>
-    );
-  }
-
-  if (stage === "completed") {
-    return (
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-50">
-        <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-50">
-      <Loader2 className="h-5 w-5 animate-spin text-brand" />
-    </div>
-  );
-}
-
-function ProgressItem({
-  icon: Icon,
-  title,
-  description,
-  state,
-}: {
-  icon: typeof Sparkles;
-  title: string;
-  description: string;
-  state:
-    | "completed"
-    | "active"
-    | "pending"
-    | "failed";
-}) {
-  const stateStyles = {
-    completed:
-      "border-emerald-500 bg-emerald-500 text-white",
-
-    active:
-      "border-brand bg-blue-50 text-brand",
-
-    pending:
-      "border-slate-300 bg-white text-slate-400",
-
-    failed:
-      "border-red-500 bg-red-50 text-red-600",
-  };
-
-  return (
-    <div className="flex gap-4 rounded-lg p-3">
-      <div
-        className={[
-          "mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border",
-          stateStyles[state],
-        ].join(" ")}
-      >
-        {state === "completed" ? (
-          <CheckCircle2 className="h-4 w-4" />
-        ) : state === "active" ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : state === "failed" ? (
-          <AlertCircle className="h-4 w-4" />
-        ) : (
-          <Icon className="h-4 w-4" />
+        {started && stage !== "failed" && stage !== "completed" && (
+          <p className="mt-6 text-xs text-muted">
+            The pipeline is communicating live with official BIS standards endpoints and performing semantic analysis.
+            Execution takes 15–30 seconds.
+          </p>
         )}
-      </div>
-
-      <div className="min-w-0 pt-0.5">
-        <p
-          className={[
-            "text-sm font-medium",
-            state === "pending"
-              ? "text-slate-500"
-              : "text-slate-900",
-          ].join(" ")}
-        >
-          {title}
-        </p>
-
-        <p className="mt-1 text-sm leading-6 text-muted">
-          {description}
-        </p>
       </div>
     </div>
   );

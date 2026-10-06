@@ -282,3 +282,65 @@ def get_analysis_result_summary(
         )
 
     return frontend
+
+
+# ----------------------------------------------------------------------
+# Get analysis status
+# ----------------------------------------------------------------------
+
+@router.get(
+    "/{analysis_id}/status"
+)
+def get_analysis_status(
+    analysis_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Check current execution status of the analysis pipeline.
+    """
+    from app.models.analysis import ProcurementAnalysis
+
+    analysis = db.get(ProcurementAnalysis, analysis_id)
+    if not analysis:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"Analysis {analysis_id} not found.",
+                "analysis_id": analysis_id,
+            },
+        )
+
+    result = db.execute(
+        select(AnalysisResult).where(
+            AnalysisResult.analysis_id == analysis_id
+        )
+    ).scalar_one_or_none()
+
+    if result is not None:
+        try:
+            stored = json.loads(result.result_json)
+            return {
+                "analysis_id": analysis_id,
+                "status": stored.get("status", "completed"),
+                "success": stored.get("success", True),
+                "processing": stored.get("processing", {}),
+                "errors": stored.get("errors", []),
+            }
+        except json.JSONDecodeError:
+            pass
+
+    status_str = (analysis.status or "CREATED").upper()
+    mapped_status = {
+        "CREATED": "queued",
+        "PROCESSING": "bis_search",
+        "COMPLETED": "completed",
+        "FAILED": "failed",
+    }.get(status_str, status_str.lower())
+
+    return {
+        "analysis_id": analysis_id,
+        "status": mapped_status,
+        "success": status_str != "FAILED",
+        "processing": {},
+        "errors": [],
+    }

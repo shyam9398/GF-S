@@ -32,7 +32,7 @@ class BISApplicabilityService:
 
     def __init__(
         self,
-        minimum_direct_score: float = 0.65,
+        minimum_direct_score: float = 0.50,
     ):
         self.minimum_direct_score = minimum_direct_score
 
@@ -376,68 +376,100 @@ class BISApplicabilityService:
                 procurement.get("product_category")
             ),
             "application": BISApplicabilityService._clean(
-                procurement.get(
-                    "intended_application"
-                )
+                procurement.get("application")
+                or procurement.get("intended_application")
             ),
             "technical": BISApplicabilityService._clean(
-                procurement.get(
-                    "technical_requirements"
-                )
-                or procurement.get(
-                    "technical_specifications"
-                )
+                procurement.get("technical_specifications")
+                or procurement.get("technical_requirements")
             ),
             "performance": BISApplicabilityService._clean(
-                procurement.get(
-                    "performance_requirements"
-                )
+                procurement.get("performance_requirements")
             ),
             "safety": BISApplicabilityService._clean(
-                procurement.get(
-                    "safety_requirements"
-                )
-                or procurement.get(
-                    "hazards"
-                )
+                procurement.get("safety_requirements")
+                or procurement.get("hazards")
             ),
             "testing": BISApplicabilityService._clean(
-                procurement.get(
-                    "testing_requirements"
-                )
+                procurement.get("testing_requirements")
             ),
             "material": BISApplicabilityService._clean(
-                procurement.get(
-                    "material"
-                )
-                or procurement.get(
-                    "materials"
-                )
+                procurement.get("materials")
+                or procurement.get("material")
+            ),
+            "keyword": BISApplicabilityService._clean(
+                procurement.get("keywords")
+                or procurement.get("search_keywords")
             ),
         }
 
-    @staticmethod
+    @classmethod
+    def _field_token_match(
+        cls,
+        field_text: str,
+        target_text: str,
+    ) -> dict[str, Any]:
+        field_tokens = cls._tokens(field_text)
+        target_tokens = cls._tokens(target_text)
+
+        if not field_tokens:
+            return {"score": 0.0, "matched_tokens": []}
+
+        clean_field = cls._clean(field_text).lower()
+        clean_target = cls._clean(target_text).lower()
+
+        # Direct phrase match gives full score
+        if len(clean_field) > 3 and clean_field in clean_target:
+            return {
+                "score": 1.0,
+                "matched_tokens": sorted(field_tokens),
+            }
+
+        matched = set()
+        for f in field_tokens:
+            for t in target_tokens:
+                # Match identical tokens or common singular/plural stems
+                if f == t:
+                    matched.add(f)
+                    break
+                if (
+                    len(f) > 3
+                    and len(t) > 3
+                    and (f.startswith(t[:4]) or t.startswith(f[:4]))
+                ):
+                    matched.add(f)
+                    break
+
+        coverage = len(matched) / len(field_tokens) if field_tokens else 0.0
+        return {
+            "score": round(coverage, 4),
+            "matched_tokens": sorted(matched),
+        }
+
+    @classmethod
     def _field_match_score(
+        cls,
         procurement: dict[str, Any],
         standard_text: str,
     ) -> dict[str, Any]:
         groups = (
-            BISApplicabilityService._build_requirement_groups(
+            cls._build_requirement_groups(
                 procurement
             )
         )
 
         results: dict[str, Any] = {}
 
+        # Section 13 Deterministic Ranking Weights:
+        # Product Match 30%, Application Match 25%, Technical Match 20%,
+        # Material Match 10%, Safety Match 10%, Keyword Match 5%
         weights = {
             "product": 0.30,
-            "category": 0.15,
-            "application": 0.15,
-            "technical": 0.12,
-            "performance": 0.10,
-            "safety": 0.08,
-            "testing": 0.06,
-            "material": 0.04,
+            "application": 0.25,
+            "technical": 0.20,
+            "material": 0.10,
+            "safety": 0.10,
+            "keyword": 0.05,
         }
 
         weighted_score = 0.0
@@ -447,14 +479,12 @@ class BISApplicabilityService:
             if not value:
                 continue
 
-            overlap = (
-                BISApplicabilityService.calculate_token_overlap(
-                    value,
-                    standard_text,
-                )
+            match_res = cls._field_token_match(
+                value,
+                standard_text,
             )
 
-            score = overlap["score"]
+            score = match_res["score"]
             weight = weights.get(
                 field,
                 0.0,
@@ -463,12 +493,11 @@ class BISApplicabilityService:
             weighted_score += (
                 score * weight
             )
-
             active_weight += weight
 
             results[field] = {
                 "score": score,
-                "matched_tokens": overlap[
+                "matched_tokens": match_res[
                     "matched_tokens"
                 ],
             }
@@ -1453,19 +1482,21 @@ class BISApplicabilityService:
 
         # DIRECT:
         # Require authoritative BIS details plus a meaningful
-        # procurement-to-standard alignment. Evidence metadata alone
-        # can never create a direct recommendation.
-
+        # procurement-to-standard alignment.
         if (
-            semantic_alignment
-            >= self.minimum_direct_score
-            and evidence_confidence >= 0.45
+            (semantic_alignment >= self.minimum_direct_score or strong_product_match)
+            and evidence_confidence >= 0.35
             and meaningful_requirement_match
             and status.get(
                 "withdraw_status"
             ) != 1
         ):
             classification = self.DIRECT
+
+            if strong_product_match:
+                reasons.append(
+                    "Direct product match: standard scope directly addresses the specified product requirements."
+                )
 
             reasons.append(
                 "The procurement requirements show strong "

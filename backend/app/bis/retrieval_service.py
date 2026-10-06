@@ -275,7 +275,8 @@ class BISRetrievalService:
         ):
             return []
 
-        return candidates
+        # Keep a manageable candidate set per Section 12 (top 15-20 candidates)
+        return candidates[:20]
 
     # =========================================================
     # BUILD RETRIEVAL COVERAGE

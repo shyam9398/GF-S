@@ -1,55 +1,63 @@
 import json
+import logging
+import time
+from typing import Any
 
 from google import genai
+from google.genai.errors import ServerError, ClientError
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiService:
     """
-    Gemini is used only to understand and structure procurement
-    requirements.
+    AI-powered procurement specification understanding engine.
 
-    Gemini is NOT the source of truth for Indian Standards,
-    BIS evidence, revisions, amendments, or certification.
+    Gemini is used ONLY to understand and structure procurement
+    specifications. Gemini does NOT invent Indian Standard (IS) numbers.
+    All Indian Standards originate from authoritative BIS sources.
     """
 
-    MODEL = "gemini-3.7-flash"
+    CANDIDATE_MODELS = [
+        "gemini-flash-lite-latest",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-flash-latest",
+    ]
 
-    SYSTEM_INSTRUCTION = """
-You are a procurement specification analysis assistant.
+    SYSTEM_INSTRUCTION = (
+        "You are a procurement specification analysis engine.\n\n"
+        "Analyze only the supplied document content.\n\n"
+        "Identify the product, intended application, materials, technical specifications, "
+        "parameters, performance requirements, testing requirements, safety requirements, "
+        "and important domain terminology.\n\n"
+        "Do not invent information.\n\n"
+        "Do not generate Indian Standard numbers.\n\n"
+        "Your job at this stage is ONLY to understand and structure the procurement specification.\n\n"
+        "Return valid JSON only."
+    )
 
-Your job is ONLY to understand and structure the procurement
-requirement provided by the user.
+    JSON_SCHEMA_INSTRUCTION = """
+Return valid JSON adhering strictly to this schema:
+{
+  "product_name": "",
+  "product_category": "",
+  "application": "",
+  "materials": [],
+  "dimensions": [],
+  "technical_specifications": [],
+  "parameters": [],
+  "performance_requirements": [],
+  "testing_requirements": [],
+  "safety_requirements": [],
+  "keywords": [],
+  "procurement_context": ""
+}
 
-You MUST NOT:
-- invent Indian Standard (IS) numbers
-- invent BIS standards
-- claim that a standard applies
-- invent certification requirements
-- use your own knowledge as authoritative BIS evidence
-
-The actual Indian Standards will be retrieved separately from
-authoritative BIS sources.
-
-Your output will be used to create search queries for the
-BIS retrieval system.
-
-Extract:
-- product
-- product category
-- intended application
-- procurement purpose
-- materials
-- technical requirements
-- performance requirements
-- safety requirements
-- hazards
-- testing requirements
-- certification/conformity context
-- important keywords for standards retrieval
-
-Return ONLY valid JSON.
+Do NOT hallucinate missing information.
+If something is not present, return null or []. Do not guess.
 """
 
     def __init__(self):
@@ -57,106 +65,161 @@ Return ONLY valid JSON.
             api_key=settings.gemini_api_key
         )
 
-    def analyze_procurement_requirement(
-        self,
-        document_text: str,
-    ) -> dict:
+    def _call_model_with_fallback(self, prompt: str) -> str:
         """
-        Analyze and structure procurement requirements using Gemini.
-
-        Gemini is only used for requirement understanding.
-        It must not generate or validate Indian Standard numbers.
+        Execute generate_content with model fallbacks and retry on transient errors.
         """
+        last_error = None
 
-        prompt = f"""
-{self.SYSTEM_INSTRUCTION}
+        for model in self.CANDIDATE_MODELS:
+            for attempt in range(2):
+                try:
+                    logger.info(f"[AI] Attempting generate_content with {model} (attempt {attempt + 1})")
+                    response = self.client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                    )
+                    text = (response.text or "").strip()
+                    if text:
+                        return text
+                except (ServerError, ClientError) as exc:
+                    last_error = exc
+                    logger.warning(f"[AI] Model {model} attempt {attempt + 1} failed: {exc}")
+                    time.sleep(1.0)
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(f"[AI] Model {model} unexpected error: {exc}")
+                    break
 
-Analyze the following procurement document.
-
-DOCUMENT:
-
-{document_text}
-
-Return JSON using exactly this structure:
-
-{{
-  "product": "",
-  "product_category": "",
-  "intended_application": [],
-  "procurement_purpose": "",
-  "materials": [],
-  "technical_requirements": [],
-  "performance_requirements": [],
-  "safety_requirements": [],
-  "hazards": [],
-  "testing_requirements": [],
-  "certification_context": [],
-  "search_keywords": []
-}}
-"""
-
-        response = self.client.models.generate_content(
-            model=self.MODEL,
-            contents=prompt,
+        raise RuntimeError(
+            f"All AI candidate models failed. Last error: {last_error}"
         )
 
-        text = response.text or ""
-        text = text.strip()
+    def analyze_procurement_requirement(
+        self,
+        document_text: Any,
+    ) -> dict[str, Any]:
+        """
+        Analyze and structure procurement requirements using Gemini.
+        Returns the structured schema requested in Section 6.
+        """
+        if isinstance(document_text, dict):
+            parts = []
+            for k, v in document_text.items():
+                if v:
+                    parts.append(f"{k.upper()}: {v}")
+            clean_text = "\n\n".join(parts)
+        else:
+            clean_text = str(document_text or "").strip()
 
-        # Remove Markdown JSON fences if Gemini returns them.
-        if text.startswith("```json"):
-            text = text[7:]
+        if not clean_text:
+            return {
+                "product_name": None,
+                "product_category": None,
+                "application": None,
+                "materials": [],
+                "dimensions": [],
+                "technical_specifications": [],
+                "parameters": [],
+                "performance_requirements": [],
+                "testing_requirements": [],
+                "safety_requirements": [],
+                "keywords": [],
+                "procurement_context": None,
+            }
 
-        elif text.startswith("```"):
-            text = text[3:]
+        prompt = f"""{self.SYSTEM_INSTRUCTION}
 
-        if text.endswith("```"):
-            text = text[:-3]
+{self.JSON_SCHEMA_INSTRUCTION}
 
-        text = text.strip()
+PROCUREMENT DOCUMENT CONTENT:
+{clean_text}
+"""
+
+        raw_text = self._call_model_with_fallback(prompt)
+
+        # Strip markdown code blocks
+        clean_json = raw_text.strip()
+        if clean_json.startswith("```json"):
+            clean_json = clean_json[7:]
+        elif clean_json.startswith("```"):
+            clean_json = clean_json[3:]
+        if clean_json.endswith("```"):
+            clean_json = clean_json[:-3]
+        clean_json = clean_json.strip()
 
         try:
-            result = json.loads(text)
+            result = json.loads(clean_json)
         except json.JSONDecodeError as exc:
+            logger.error(f"[AI] JSON decoding failed: {clean_json[:300]}")
             raise ValueError(
-                f"Gemini returned invalid JSON: {text[:500]}"
+                f"Gemini returned invalid JSON: {clean_json[:300]}"
             ) from exc
 
         if not isinstance(result, dict):
-            raise ValueError(
-                "Gemini response must be a JSON object."
-            )
+            raise ValueError("Gemini response must be a JSON object.")
 
-        return result
+        # Ensure all required schema fields exist
+        normalized: dict[str, Any] = {
+            "product_name": result.get("product_name") or result.get("product") or None,
+            "product_category": result.get("product_category") or None,
+            "application": result.get("application") or result.get("intended_application") or None,
+            "materials": result.get("materials") if isinstance(result.get("materials"), list) else [],
+            "dimensions": result.get("dimensions") if isinstance(result.get("dimensions"), list) else [],
+            "technical_specifications": (
+                result.get("technical_specifications")
+                if isinstance(result.get("technical_specifications"), list)
+                else result.get("technical_requirements") if isinstance(result.get("technical_requirements"), list) else []
+            ),
+            "parameters": result.get("parameters") if isinstance(result.get("parameters"), list) else [],
+            "performance_requirements": (
+                result.get("performance_requirements")
+                if isinstance(result.get("performance_requirements"), list)
+                else []
+            ),
+            "testing_requirements": (
+                result.get("testing_requirements")
+                if isinstance(result.get("testing_requirements"), list)
+                else []
+            ),
+            "safety_requirements": (
+                result.get("safety_requirements")
+                if isinstance(result.get("safety_requirements"), list)
+                else []
+            ),
+            "keywords": (
+                result.get("keywords")
+                if isinstance(result.get("keywords"), list)
+                else result.get("search_keywords") if isinstance(result.get("search_keywords"), list) else []
+            ),
+            "procurement_context": result.get("procurement_context") or result.get("procurement_purpose") or None,
+        }
+
+        # Also supply legacy keys so downstream consumers don't break
+        normalized["product"] = normalized["product_name"]
+        normalized["intended_application"] = normalized["application"]
+        normalized["technical_requirements"] = normalized["technical_specifications"]
+        normalized["search_keywords"] = normalized["keywords"]
+        normalized["procurement_purpose"] = normalized["procurement_context"]
+
+        return normalized
 
     async def structure_requirements(
         self,
-        document_text: str,
-    ) -> dict:
+        document_text: Any,
+    ) -> dict[str, Any]:
         """
         Async interface used by AnalysisPipelineService.
-
-        The pipeline expects structure_requirements() to be
-        awaitable, while the Gemini SDK call above is synchronous.
-
-        Gemini only structures procurement requirements.
-        It does not provide authoritative BIS standards.
         """
-
         return self.analyze_procurement_requirement(
             document_text
         )
 
 
-# Backward-compatible function.
-# Existing code that imports analyze_procurement_requirement()
-# will continue to work.
 def analyze_procurement_requirement(
-    document_text: str,
-) -> dict:
-
+    document_text: Any,
+) -> dict[str, Any]:
     service = GeminiService()
-
     return service.analyze_procurement_requirement(
         document_text
     )

@@ -10,10 +10,9 @@ import {
 } from "lucide-react";
 
 import { createAnalysis } from "../services/analysisService";
+import { API_BASE_URL } from "../services/api";
 
-const API_URL =
-  import.meta.env.VITE_API_URL ||
-  "http://localhost:8001/api";
+const API_URL = API_BASE_URL;
 
 export default function NewAnalysis() {
   const navigate = useNavigate();
@@ -272,7 +271,7 @@ export default function NewAnalysis() {
       setError(
         error instanceof Error
           ? error.message
-          : "Unable to create the analysis. Make sure the FastAPI backend is running on port 8001.",
+          : "Unable to create the analysis. Make sure the FastAPI backend is running on port 8000.",
       );
     } finally {
       setLoading(false);

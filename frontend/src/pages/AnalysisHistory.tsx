@@ -11,9 +11,9 @@ import {
   Plus,
 } from "lucide-react";
 
-const API_URL =
-  import.meta.env.VITE_API_URL ||
-  "http://localhost:8001/api";
+import { API_BASE_URL } from "../services/api";
+
+const API_URL = API_BASE_URL;
 
 type Analysis = {
   id: string;

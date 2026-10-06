@@ -9,9 +9,9 @@ import {
   RefreshCw,
 } from "lucide-react";
 
-const API_URL =
-  import.meta.env.VITE_API_URL ||
-  "http://localhost:8001/api";
+import { API_BASE_URL } from "../services/api";
+
+const API_URL = API_BASE_URL;
 
 type Analysis = {
   id: string;
@@ -142,7 +142,7 @@ export default function Reports() {
       );
 
       setError(
-        "Unable to load reports. Make sure the FastAPI backend is running on port 8001.",
+        "Unable to load reports. Make sure the FastAPI backend is running on port 8000.",
       );
     } finally {
       setLoading(false);

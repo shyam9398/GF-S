@@ -430,7 +430,9 @@ class BISPipelineService:
             )
 
             return {
-                "success": False,
+                "success": True,
+
+                "status": "no_results",
 
                 "stage": "discovery",
 
@@ -454,12 +456,13 @@ class BISPipelineService:
 
                 "coverage": coverage,
 
+                "recommended_standards": [],
+
                 "errors": [
-                    (
-                        "No BIS candidate standards were "
-                        "discovered from the generated search "
-                        "concepts."
-                    )
+                    {
+                        "stage": "BIS_SEARCH",
+                        "message": "No matching standards were retrieved.",
+                    }
                 ],
 
                 "warnings": [
@@ -560,6 +563,8 @@ class BISPipelineService:
 
         return {
             "success": True,
+
+            "status": "completed",
 
             "pipeline": {
                 "started_at": started_at,
