@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
 import AppShell from "./components/layout/AppShell";
 import Dashboard from "./pages/Dashboard";
 import NewAnalysis from "./pages/NewAnalysis";
@@ -8,51 +8,143 @@ import AnalysisHistory from "./pages/AnalysisHistory";
 import Reports from "./pages/Reports";
 import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
+import LandingPage from "./pages/LandingPage";
+import ProcurementOfficerAccess from "./pages/ProcurementOfficerAccess";
+import SignIn from "./pages/SignIn";
+import SignUp from "./pages/SignUp";
+import ProtectedRoute from "./components/auth/ProtectedRoute";
+import PublicOnlyRoute from "./components/auth/PublicOnlyRoute";
+import { AuthProvider } from "./context/AuthContext";
 import { I18nProvider } from "./i18n/I18nContext";
 
 export default function App() {
   return (
-    <I18nProvider>
-      <AppShell>
+    <AuthProvider>
+      <I18nProvider>
         <Routes>
+          {/* Public Landing & Authentication Routes */}
+          <Route path="/" element={<LandingPage />} />
           <Route
-            path="/"
-            element={<Navigate to="/dashboard" replace />}
+            path="/procurement-officer"
+            element={
+              <PublicOnlyRoute>
+                <ProcurementOfficerAccess />
+              </PublicOnlyRoute>
+            }
           />
           <Route
+            path="/login"
+            element={
+              <PublicOnlyRoute>
+                <SignIn />
+              </PublicOnlyRoute>
+            }
+          />
+          <Route
+            path="/signup"
+            element={
+              <PublicOnlyRoute>
+                <SignUp />
+              </PublicOnlyRoute>
+            }
+          />
+
+          {/* Protected Dashboard & Analysis Routes */}
+          <Route
             path="/dashboard"
-            element={<Dashboard />}
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <Dashboard />
+                </AppShell>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/new-analysis"
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <NewAnalysis />
+                </AppShell>
+              </ProtectedRoute>
+            }
           />
           <Route
             path="/analysis/new"
-            element={<NewAnalysis />}
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <NewAnalysis />
+                </AppShell>
+              </ProtectedRoute>
+            }
           />
           <Route
             path="/analysis/:id/progress"
-            element={<AnalysisProgress />}
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <AnalysisProgress />
+                </AppShell>
+              </ProtectedRoute>
+            }
           />
           <Route
             path="/analysis/:id/results"
-            element={<Results />}
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <Results />
+                </AppShell>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/results/:id"
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <Results />
+                </AppShell>
+              </ProtectedRoute>
+            }
           />
           <Route
             path="/history"
-            element={<AnalysisHistory />}
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <AnalysisHistory />
+                </AppShell>
+              </ProtectedRoute>
+            }
           />
           <Route
             path="/reports"
-            element={<Reports />}
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <Reports />
+                </AppShell>
+              </ProtectedRoute>
+            }
           />
           <Route
             path="/settings"
-            element={<Settings />}
+            element={
+              <ProtectedRoute>
+                <AppShell>
+                  <Settings />
+                </AppShell>
+              </ProtectedRoute>
+            }
           />
-          <Route
-            path="*"
-            element={<NotFound />}
-          />
+
+          {/* Fallback 404 Route */}
+          <Route path="*" element={<NotFound />} />
         </Routes>
-      </AppShell>
-    </I18nProvider>
+      </I18nProvider>
+    </AuthProvider>
   );
 }

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import {
   FileSearch,
   LayoutDashboard,
@@ -11,8 +11,11 @@ import {
   Menu,
   X,
   ExternalLink,
+  LogOut,
+  Shield,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/I18nContext";
+import { useAuth } from "../../context/AuthContext";
 
 interface AppShellProps {
   children: ReactNode;
@@ -20,8 +23,23 @@ interface AppShellProps {
 
 export default function AppShell({ children }: AppShellProps) {
   const { t, language, setLanguage, languages, currentLangMeta } = useTranslation();
+  const { profile, user, signOut } = useAuth();
+  const navigate = useNavigate();
+
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [langDropdownOpen, setLangDropdownOpen] = useState(false);
+
+  // Derive username with fallback
+  const username =
+    profile?.username ||
+    (user?.user_metadata?.username as string) ||
+    user?.email?.replace("@bis.local", "") ||
+    "officer.bis";
+
+  const handleLogout = async () => {
+    await signOut();
+    navigate("/login", { replace: true });
+  };
 
   const navigation = [
     {
@@ -63,14 +81,14 @@ export default function AppShell({ children }: AppShellProps) {
 
       {/* Sidebar - Desktop & Mobile */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 w-64 border-r border-slate-200 bg-white transition-transform duration-200 ease-in-out lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-50 w-64 border-r border-slate-200 bg-white transition-transform duration-200 ease-in-out lg:translate-x-0 flex flex-col ${
           mobileMenuOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
         {/* Logo */}
-        <div className="flex h-16 items-center justify-between border-b border-slate-200 px-5">
+        <div className="flex h-16 items-center justify-between border-b border-slate-200 px-5 shrink-0">
           <div className="flex items-center gap-3">
-            <div className="grid h-9 w-9 place-items-center rounded-lg bg-blue-600 text-white shadow-sm">
+            <div className="grid h-9 w-9 place-items-center rounded-lg bg-[#0F2B48] text-white shadow-sm">
               <FileSearch size={18} />
             </div>
             <div>
@@ -91,7 +109,7 @@ export default function AppShell({ children }: AppShellProps) {
         </div>
 
         {/* Navigation */}
-        <nav className="space-y-1 p-3">
+        <nav className="flex-1 space-y-1 p-3 overflow-y-auto">
           {navigation.map((item) => {
             const Icon = item.icon;
             return (
@@ -115,8 +133,32 @@ export default function AppShell({ children }: AppShellProps) {
           })}
         </nav>
 
+        {/* Procurement Officer Identity & Logout in Sidebar */}
+        <div className="p-3 border-t border-slate-200 bg-slate-50 shrink-0">
+          <div className="flex items-center gap-2.5 mb-2.5">
+            <div className="w-8 h-8 rounded-lg bg-[#0F2B48] text-white flex items-center justify-center font-bold text-xs border border-blue-950 shrink-0 shadow-2xs">
+              <Shield size={14} className="text-red-400" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider leading-none">
+                Procurement Officer
+              </p>
+              <p className="text-xs font-bold text-[#0F2B48] truncate mt-1 font-mono" title={username}>
+                {username}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100/80 border border-red-200 rounded-lg transition cursor-pointer"
+          >
+            <LogOut size={13} />
+            <span>Logout</span>
+          </button>
+        </div>
+
         {/* Portal Info Footer */}
-        <div className="absolute bottom-0 inset-x-0 p-4 border-t border-slate-200 bg-slate-50">
+        <div className="p-3 border-t border-slate-200 bg-slate-100/60 shrink-0">
           <div className="flex items-center justify-between text-xs text-slate-500">
             <span className="font-semibold text-slate-700">BIS Care Portal</span>
             <a
@@ -128,7 +170,7 @@ export default function AppShell({ children }: AppShellProps) {
               Verify <ExternalLink size={11} />
             </a>
           </div>
-          <p className="text-[11px] text-slate-400 mt-1">SIH 2026 Prototype • PS 26108</p>
+          <p className="text-[11px] text-slate-400 mt-0.5">SIH 2026 Prototype • PS 26108</p>
         </div>
       </aside>
 
@@ -203,6 +245,26 @@ export default function AppShell({ children }: AppShellProps) {
             <div className="hidden sm:flex items-center gap-2 pl-2 border-l border-slate-200 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
               BIS Live
+            </div>
+
+            {/* Officer Profile Badge & Quick Logout in Header */}
+            <div className="hidden md:flex items-center gap-2 pl-2 border-l border-slate-200">
+              <div className="text-right">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 leading-none">
+                  Procurement Officer
+                </p>
+                <p className="text-xs font-mono font-bold text-[#0F2B48] leading-tight mt-0.5">
+                  {username}
+                </p>
+              </div>
+              <button
+                onClick={handleLogout}
+                title="Logout"
+                className="p-1.5 text-slate-400 hover:text-red-700 hover:bg-red-50 rounded-lg border border-transparent hover:border-red-200 transition cursor-pointer"
+                aria-label="Logout"
+              >
+                <LogOut size={16} />
+              </button>
             </div>
           </div>
         </header>
