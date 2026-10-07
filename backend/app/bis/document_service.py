@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from docling.document_converter import DocumentConverter
+from app.documents.extractor import get_converter
 
 
 class BISDocumentService:
@@ -41,8 +41,6 @@ class BISDocumentService:
             timeout=timeout,
             follow_redirects=True,
         )
-
-        self.converter = DocumentConverter()
 
     # =========================================================
     # BUILD BIS DOCUMENT URL
@@ -150,7 +148,8 @@ class BISDocumentService:
                 f"{document_path}"
             )
 
-        result = self.converter.convert(
+        converter = get_converter()
+        result = converter.convert(
             str(document_path)
         )
 

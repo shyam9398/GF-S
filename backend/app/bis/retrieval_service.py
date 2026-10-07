@@ -93,38 +93,30 @@ class BISRetrievalService:
             }
 
         async with self._search_semaphore:
-
             try:
-                records = (
-                    await self.provider.search_standards(
-                        query
-                    )
-                )
+                detailed = await self.provider.search_standards_detailed(query)
+                status = detailed.get("status", "SUCCESS_WITH_RESULTS")
+                records = detailed.get("records", [])
+                error_msg = detailed.get("error")
 
-                if not isinstance(
-                    records,
-                    list,
-                ):
-                    records = []
+                is_success = status in ("SUCCESS_WITH_RESULTS", "SUCCESS_NO_RESULTS")
 
                 return {
                     "query": query,
                     "records": records,
                     "record_count": len(records),
-                    "success": True,
-                    "error": None,
+                    "status": status,
+                    "success": is_success,
+                    "error": error_msg,
                 }
-
             except Exception as exc:
-
                 return {
                     "query": query,
                     "records": [],
                     "record_count": 0,
+                    "status": "BIS_HTTP_ERROR",
                     "success": False,
-                    "error": (
-                        f"{type(exc).__name__}: {exc}"
-                    ),
+                    "error": f"{type(exc).__name__}: {exc}",
                 }
 
     # =========================================================

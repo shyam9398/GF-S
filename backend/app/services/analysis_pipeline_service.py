@@ -684,24 +684,22 @@ class AnalysisPipelineService:
                 "key_specifications": key_specs[:10],
             }
 
-            primary_applicable = frontend_result.get("primary_applicable") or [
-                s for s in (frontend_result.get("recommended_standards") or [])
-                if s.get("human_classification") == "Highly Applicable"
-            ]
-            related_supporting = frontend_result.get("related_supporting") or [
-                s for s in (frontend_result.get("recommended_standards") or [])
-                if s not in primary_applicable
-            ]
+            primary_applicable = frontend_result.get("primary_applicable") or []
+            normative_references = frontend_result.get("normative_references") or []
+            allied_standards = frontend_result.get("allied_standards") or []
+            related_supporting = frontend_result.get("related_supporting") or []
             needs_verification = frontend_result.get("needs_verification") or []
             not_applicable = frontend_result.get("not_applicable") or []
-            recommended_standards = frontend_result.get("recommended_standards") or (primary_applicable + related_supporting)
+            recommended_standards = frontend_result.get("recommended_standards") or (primary_applicable + normative_references + allied_standards + related_supporting)
             related_standards = frontend_result.get("related_standards") or []
             normative_standards = frontend_result.get("normative_standards") or []
             relationship_verifications = frontend_result.get("relationship_verifications") or []
 
             logger.info(
                 f"[RECOMMENDATION] Primary: {len(primary_applicable)} | "
-                f"Related: {len(related_supporting)} | "
+                f"Normative: {len(normative_references)} | "
+                f"Allied: {len(allied_standards)} | "
+                f"Supporting: {len(related_supporting)} | "
                 f"Needs Verification: {len(needs_verification)} | "
                 f"Not Applicable: {len(not_applicable)}"
             )
@@ -738,12 +736,17 @@ class AnalysisPipelineService:
                 "input_summary": input_summary,
                 "recommended_standards": recommended_standards,
                 "primary_applicable": primary_applicable,
+                "normative_references": normative_references,
+                "allied_standards": allied_standards,
+                "supporting_standards": related_supporting,
                 "related_supporting": related_supporting,
                 "needs_verification": needs_verification,
                 "not_applicable": not_applicable,
 
                 # Uppercase Section 2 categories
                 "PRIMARY_APPLICABLE": primary_applicable,
+                "NORMATIVE_REFERENCES": normative_references,
+                "ALLIED_STANDARDS": allied_standards,
                 "RELATED_SUPPORTING": related_supporting,
                 "NEEDS_VERIFICATION": needs_verification,
                 "NOT_APPLICABLE": not_applicable,

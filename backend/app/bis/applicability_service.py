@@ -4,6 +4,7 @@ from typing import Any
 
 from app.bis.compatibility_service import BISCompatibilityService
 from app.bis.semantic_service import BISSemanticService
+from app.bis.certification_service import BISCertificationService
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +24,14 @@ class BISApplicabilityService:
     - Insufficient evidence remains NEEDS_VERIFICATION.
     """
 
-    DIRECT = "DIRECTLY_APPLICABLE"
+    PRIMARY = "PRIMARY_APPLICABLE"
+    DIRECT = "PRIMARY_APPLICABLE"
+    NORMATIVE = "NORMATIVE_REFERENCE"
+    ALLIED = "ALLIED_STANDARD"
     SUPPORTING = "RELATED_SUPPORTING"
     TEST_METHOD = "TEST_METHOD"
     SAMPLING = "SAMPLING_METHOD"
     SAFETY = "SAFETY_RELATED"
-    NORMATIVE = "NORMATIVE_REFERENCE"
     TERMINOLOGY = "TERMINOLOGY_REFERENCE"
     POTENTIAL = "POTENTIALLY_RELEVANT"
     NOT_APPLICABLE = "NOT_APPLICABLE"
@@ -93,6 +96,9 @@ class BISApplicabilityService:
         return (
             candidate.get("standardNumber")
             or candidate.get("standard_number")
+            or candidate.get("is_number")
+            or candidate.get("isNumber")
+            or candidate.get("standard_no")
         )
 
     @staticmethod
@@ -102,6 +108,9 @@ class BISApplicabilityService:
         return (
             candidate.get("standardName")
             or candidate.get("standard_name")
+            or candidate.get("title")
+            or candidate.get("shortTitle")
+            or candidate.get("name")
         )
 
     @staticmethod
@@ -974,66 +983,61 @@ class BISApplicabilityService:
                         "data"
                     )
 
+        raw_withdraw = (
+            detail_data.get("withdrawStatus")
+            or detail_data.get("withdraw_status")
+            or candidate.get("withdrawStatus")
+            or candidate.get("withdraw_status")
+        )
+        status_text = str(detail_data.get("status") or candidate.get("status") or "").lower()
+        if "withdrawn" in status_text:
+            raw_withdraw = 1
+
+        superseded_val = (
+            detail_data.get("superseded_byis")
+            or detail_data.get("supersededBy")
+            or detail_data.get("superseded_by")
+            or candidate.get("superseded_by")
+            or candidate.get("supersededBy")
+        )
+
         return {
-            "withdraw_status": (
-                detail_data.get(
-                    "withdrawStatus"
-                )
-                if detail_data
-                else candidate.get(
-                    "withdrawStatus"
-                )
-            ),
+            "withdraw_status": raw_withdraw,
             "withdraw_on": (
-                detail_data.get(
-                    "withdrawOn"
-                )
-                if detail_data
-                else candidate.get(
-                    "withdrawOn"
-                )
+                detail_data.get("withdrawOn")
+                or detail_data.get("withdraw_on")
+                or candidate.get("withdrawOn")
+                or candidate.get("withdraw_on")
             ),
             "valid_upto": (
-                detail_data.get(
-                    "validUpto"
-                )
-                if detail_data
-                else candidate.get(
-                    "validUpto"
-                )
+                detail_data.get("validUpto")
+                or detail_data.get("valid_upto")
+                or candidate.get("validUpto")
+                or candidate.get("valid_upto")
             ),
             "published_on": (
-                detail_data.get(
-                    "publishedOn"
-                )
-                if detail_data
-                else candidate.get(
-                    "publishedOn"
-                )
+                detail_data.get("publishedOn")
+                or detail_data.get("published_on")
+                or candidate.get("publishedOn")
+                or candidate.get("published_on")
             ),
-            "review_on": detail_data.get(
-                "reviewOn"
-            ),
+            "review_on": detail_data.get("reviewOn") or detail_data.get("review_on"),
             "reaffirmation_year": (
-                detail_data.get(
-                    "reAffirmationYear"
-                )
+                detail_data.get("reAffirmationYear")
+                or detail_data.get("reaffirmation_year")
+                or candidate.get("reaffirmation_year")
             ),
             "revision_count": (
-                detail_data.get(
-                    "noOfRevision"
-                )
+                detail_data.get("noOfRevision")
+                or detail_data.get("revision_count")
+                or candidate.get("revision_count")
             ),
             "amendment_count": (
-                detail_data.get(
-                    "noOfAmendment"
-                )
+                detail_data.get("noOfAmendment")
+                or detail_data.get("amendment_count")
+                or candidate.get("amendment_count")
             ),
-            "superseded_by": (
-                detail_data.get(
-                    "superseded_byis"
-                )
-            ),
+            "superseded_by": superseded_val,
         }
 
     # ------------------------------------------------------------------
@@ -1274,11 +1278,13 @@ class BISApplicabilityService:
         self,
         procurement: dict[str, Any],
         enriched_candidate: dict[str, Any],
+        semantic_score: float | None = None,
     ) -> dict[str, Any]:
         candidate = enriched_candidate.get(
-            "candidate",
-            {},
+            "candidate"
         )
+        if not candidate or not isinstance(candidate, dict):
+            candidate = enriched_candidate
 
         evidence = self._extract_evidence(
             enriched_candidate
@@ -1395,21 +1401,24 @@ class BISApplicabilityService:
         )
         standard_title = standard_name or ""
 
-        # Step 6: Semantic similarity (sentence-transformers embedding cosine similarity)
-        semantic_sim = 0.0
-        try:
-            semantic_sim = self.semantic_service.compute_similarity(
-                procurement_text,
-                [standard_text],
-            )[0]
-        except Exception as exc:
-            logger.warning(f"[SEMANTIC] Error computing semantic similarity: {exc}")
-            semantic_sim = signal.get("semantic_alignment", 0.0)
+        # Step 6: Semantic similarity
+        if semantic_score is not None:
+            semantic_sim = float(semantic_score)
+        else:
+            semantic_sim = 0.0
+            try:
+                semantic_sim = self.semantic_service.compute_similarity(
+                    procurement_text,
+                    [standard_text],
+                )[0]
+            except Exception as exc:
+                logger.warning(f"[SEMANTIC] Error computing semantic similarity: {exc}")
+                semantic_sim = signal.get("semantic_alignment", 0.0)
 
         logger.info(f"[SEMANTIC] Standard: {standard_number} Similarity score: {semantic_sim:.4f}")
 
-        # Step 5 & 8: Product compatibility determination
-        compatibility, compat_reason = self.compatibility_service.evaluate_compatibility(
+        # Step 5 & 8: Product compatibility and Standard Role determination
+        compatibility, standard_role, compat_reason = self.compatibility_service.evaluate_compatibility(
             requested_product,
             standard_title,
             standard_scope=standard_text,
@@ -1419,7 +1428,7 @@ class BISApplicabilityService:
         logger.info(
             f"[COMPATIBILITY] Requested: '{requested_product}' "
             f"Candidate: '{standard_number} - {standard_title}' "
-            f"Decision: {compatibility} Reason: {compat_reason}"
+            f"Role: {standard_role} Decision: {compatibility} Reason: {compat_reason}"
         )
 
         # --------------------------------------------------------------
@@ -1465,36 +1474,111 @@ class BISApplicabilityService:
             reasons.append("Authoritative BIS standard details were not successfully retrieved.")
 
         # --------------------------------------------------------------
-        # HARD RULE (STEP 7 & 8):
-        # IF product compatibility is MISMATCH:
-        #   classification = "NOT_APPLICABLE"
-        #   Apply strong score penalty / score cap (<= 30%)
+        # Authoritative Certification Check (Quality Control Orders)
+        # --------------------------------------------------------------
+        cert_evaluation = BISCertificationService.evaluate_certification(
+            standard_number,
+            standard_title,
+            evidence_data=evidence,
+        )
+
+        # --------------------------------------------------------------
+        # Version & Lifecycle Check
+        # --------------------------------------------------------------
+        is_withdrawn = status.get("withdraw_status") == 1
+        superseded_by = status.get("superseded_by")
+        lifecycle_status = "Withdrawn" if is_withdrawn else ("Superseded" if superseded_by else "Active")
+
+        # --------------------------------------------------------------
+        # CRITICAL HARD GATES (SECTIONS 6, 7, 8):
+        # 1. Product Mismatch -> NOT_APPLICABLE
+        # 2. Standard Role != PRODUCT_SPECIFICATION -> CANNOT BE PRIMARY
+        # 3. Withdrawn / Superseded -> NEEDS_VERIFICATION
+        # 4. Insufficient Evidence -> NEEDS_VERIFICATION
         # --------------------------------------------------------------
         if compatibility == self.compatibility_service.MISMATCH:
             classification = self.NOT_APPLICABLE
             human_classification = "Not Applicable"
             final_score = min(0.30, raw_score * 0.30)
             reasons.append(compat_reason)
-            reasons.append("Product mismatch: standard covers a different product domain.")
+            reasons.append("Product scope mismatch: candidate does not specify the procured product.")
+
+        elif standard_role != self.compatibility_service.ROLE_PRODUCT_SPECIFICATION:
+            # STRICT ROLE GATE: Non-product specifications CANNOT become primary!
+            reasons.append(compat_reason)
+            reasons.append(f"Standard functional role is {standard_role.replace('_', ' ').title()}; strictly excluded from Primary Applicable classification.")
+
+            if standard_role == self.compatibility_service.ROLE_TEST_METHOD:
+                classification = self.TEST_METHOD
+                human_classification = "Test Method (Supporting)"
+                final_score = 0.52 + min(0.20, raw_score * 0.20)
+            elif standard_role == self.compatibility_service.ROLE_SAMPLING_METHOD:
+                classification = self.SAMPLING
+                human_classification = "Sampling Method (Supporting)"
+                final_score = 0.50 + min(0.20, raw_score * 0.20)
+            elif standard_role == self.compatibility_service.ROLE_HEADFORM:
+                classification = self.SUPPORTING
+                human_classification = "Testing Apparatus (Headform)"
+                final_score = 0.45 + min(0.18, raw_score * 0.18)
+            elif standard_role == self.compatibility_service.ROLE_COMPONENT_SPECIFICATION:
+                classification = self.SUPPORTING
+                human_classification = "Component / Accessory Specification"
+                final_score = 0.52 + min(0.20, raw_score * 0.20)
+            elif standard_role == self.compatibility_service.ROLE_MATERIAL_SPECIFICATION:
+                classification = self.SUPPORTING
+                human_classification = "Material Specification"
+                final_score = 0.50 + min(0.20, raw_score * 0.20)
+            elif standard_role == self.compatibility_service.ROLE_INSTALLATION_STANDARD:
+                classification = self.SUPPORTING
+                human_classification = "Installation Standard"
+                final_score = 0.48 + min(0.20, raw_score * 0.20)
+            elif standard_role == self.compatibility_service.ROLE_SAFETY_GUIDE:
+                classification = self.SAFETY
+                human_classification = "Safety / Maintenance Guide"
+                final_score = 0.46 + min(0.20, raw_score * 0.20)
+            elif standard_role == self.compatibility_service.ROLE_TERMINOLOGY:
+                classification = self.TERMINOLOGY
+                human_classification = "Terminology Reference"
+                final_score = 0.40 + min(0.18, raw_score * 0.18)
+            elif standard_role == self.compatibility_service.ROLE_RELATED_PRODUCT:
+                classification = self.NOT_APPLICABLE
+                human_classification = "Not Applicable (Different Product)"
+                final_score = min(0.35, raw_score * 0.35)
+                reasons.append("Standard specifies a different product type/application.")
+            else:
+                classification = self.SUPPORTING
+                human_classification = "Supporting Standard"
+                final_score = 0.45 + min(0.20, raw_score * 0.20)
 
         elif compatibility == self.compatibility_service.DIRECT_MATCH:
+            # ONLY PRODUCT_SPECIFICATION with DIRECT_MATCH can qualify as PRIMARY_APPLICABLE
             reasons.append(compat_reason)
-            reasons.append("The procurement requirements show direct alignment with the BIS standard specification.")
+            reasons.append("Direct Product Specification: Standard directly defines requirements for the procured item.")
 
-            if raw_score >= 0.65 or semantic_sim >= 0.70:
-                classification = self.DIRECT
-                human_classification = "Highly Applicable"
-                final_score = 0.85 + min(0.12, raw_score * 0.12)
+            if is_withdrawn:
+                classification = self.NEEDS_VERIFICATION
+                human_classification = "Needs Verification (Withdrawn)"
+                final_score = 0.60
+                reasons.append("BIS records indicate withdrawn status; verification required for superseding standard.")
+            elif superseded_by:
+                classification = self.NEEDS_VERIFICATION
+                human_classification = "Needs Verification (Superseded)"
+                final_score = 0.60
+                reasons.append(f"Standard is superseded by {superseded_by}; verification required.")
             else:
-                classification = self.DIRECT
-                human_classification = "Applicable"
-                final_score = 0.72 + min(0.12, raw_score * 0.12)
+                classification = self.PRIMARY
+                if raw_score >= 0.65 or semantic_sim >= 0.60:
+                    human_classification = "Highly Applicable"
+                    final_score = 0.88 + min(0.10, raw_score * 0.10)
+                else:
+                    human_classification = "Applicable"
+                    final_score = 0.78 + min(0.10, raw_score * 0.10)
 
         elif compatibility == self.compatibility_service.RELATED_MATCH:
+            classification = self.ALLIED
+            human_classification = "Allied Standard"
+            final_score = 0.45 + min(0.25, raw_score * 0.25)
             reasons.append(compat_reason)
-            classification = self.SUPPORTING
-            human_classification = "Related"
-            final_score = 0.40 + min(0.25, raw_score * 0.25)
 
         else:  # UNKNOWN
             classification = self.NEEDS_VERIFICATION
@@ -1502,69 +1586,54 @@ class BISApplicabilityService:
             final_score = raw_score
             reasons.append("Insufficient evidence to establish direct product applicability.")
 
-        # Withdrawn / Superseded status check
-        if status.get("withdraw_status") == 1:
-            if classification == self.DIRECT:
-                classification = self.NEEDS_VERIFICATION
-                human_classification = "Needs Verification"
-            reasons.append("BIS evidence indicates withdrawal status; current applicability requires verification.")
-
-        if status.get("superseded_by"):
-            reasons.append(f"Standard is superseded by {status.get('superseded_by')}; verification required.")
+        if is_withdrawn and classification == self.PRIMARY:
+            classification = self.NEEDS_VERIFICATION
+            human_classification = "Needs Verification (Withdrawn)"
 
         score_pct = int(round(final_score * 100))
 
         logger.info(
             f"[RANKING] Product: {product_compat_score:.2f} Semantic: {semantic_sim:.2f} "
-            f"App: {app_score:.2f} Tech: {tech_score:.2f} Final: {score_pct}% ({human_classification})"
+            f"App: {app_score:.2f} Tech: {tech_score:.2f} Role: {standard_role} Final: {score_pct}% ({human_classification})"
         )
 
         signal["signal_score"] = round(final_score, 4)
 
         return {
             "standard_number": standard_number,
-
             "standard_name": standard_name,
-
             "classification": classification,
             "human_classification": human_classification,
+            "standard_role": standard_role,
+            "role_description": standard_role.replace("_", " ").title(),
             "applicability_score": score_pct,
             "compatibility": compatibility,
             "compat_reason": compat_reason,
             "semantic_similarity": round(semantic_sim, 4),
-
             "signal": signal,
-
             "status": status,
-
-            "certification": certification,
-
+            "lifecycle_status": lifecycle_status,
+            "certification": cert_evaluation,
             "relationships": {
                 "cross_reference_count": len(
                     relationships[
                         "cross_references"
                     ]
                 ),
-
                 "cross_follow_reference_count": len(
                     relationships[
                         "cross_follow_references"
                     ]
                 ),
-
                 "classified_relationships": (
                     relationship_matches
                 ),
             },
-
             "evidence_indicators": (
                 evidence_indicators
             ),
-
             "reasons": reasons,
-
             "evidence": evidence,
-
             "candidate": candidate,
         }
 

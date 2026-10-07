@@ -123,28 +123,38 @@ class BISWebProvider(BISRetrievalProvider):
     # SEARCH BIS STANDARDS
     # =========================================================
 
-    async def search_standards(
+    async def search_standards_detailed(
         self,
         query: str,
         **kwargs,
-    ) -> list[dict[str, Any]]:
-
+    ) -> dict[str, Any]:
+        """
+        Execute BIS standard search with explicit status differentiation:
+        - SUCCESS_WITH_RESULTS
+        - SUCCESS_NO_RESULTS
+        - BIS_HTTP_ERROR
+        - BIS_API_ERROR
+        - INVALID_RESPONSE
+        - TIMEOUT
+        - PARSER_ERROR
+        """
         if not query or not query.strip():
-            return []
+            return {
+                "status": "SUCCESS_NO_RESULTS",
+                "records": [],
+                "error": None,
+            }
 
         cleaned_query = query.strip()
         cache_key = cleaned_query.casefold()
 
-        # Cache check
         if cache_key in self._search_cache:
             cached = self._search_cache[cache_key]
-            print(f"[BIS] Reusing cached search for query: '{cleaned_query}' ({len(cached)} records)")
-            return cached
-
-        print(f"[BIS] Request started")
-        print(f"[BIS] URL: {self.SEARCH_URL}")
-        print(f"[BIS] Method: POST")
-        print(f"[BIS] Query: {cleaned_query}")
+            return {
+                "status": "SUCCESS_WITH_RESULTS" if cached else "SUCCESS_NO_RESULTS",
+                "records": cached,
+                "error": None,
+            }
 
         payload = {
             "searchText": cleaned_query,
@@ -161,47 +171,90 @@ class BISWebProvider(BISRetrievalProvider):
                 json=payload,
             )
 
-            print(f"[BIS] Response status: {response.status_code}")
-            print(f"[BIS] Response received")
-
             if response.status_code != 200:
-                print(f"[BIS] Non-200 response: {response.status_code}")
-                return []
+                return {
+                    "status": "BIS_HTTP_ERROR",
+                    "records": [],
+                    "error": f"BIS server returned HTTP {response.status_code}",
+                }
 
-            result = response.json()
+            try:
+                result = response.json()
+            except Exception as json_err:
+                return {
+                    "status": "INVALID_RESPONSE",
+                    "records": [],
+                    "error": f"Invalid JSON in BIS response: {json_err}",
+                }
+
             if not isinstance(result, dict):
-                return []
+                return {
+                    "status": "INVALID_RESPONSE",
+                    "records": [],
+                    "error": "BIS response is not a valid JSON dictionary",
+                }
 
-            if result.get("status") != "SUCCESS":
-                print(f"[BIS] Query returned 0 results: status={result.get('status')}")
-                self._search_cache[cache_key] = []
-                return []
+            api_status = result.get("status")
+            if api_status != "SUCCESS":
+                msg = str(result.get("message") or "")
+                if "no data" in msg.lower() or "not found" in msg.lower():
+                    self._search_cache[cache_key] = []
+                    return {
+                        "status": "SUCCESS_NO_RESULTS",
+                        "records": [],
+                        "error": None,
+                    }
+                return {
+                    "status": "BIS_API_ERROR",
+                    "records": [],
+                    "error": f"BIS API returned status '{api_status}': {msg}",
+                }
 
             data = result.get("data", [])
-
             if not isinstance(data, list):
-                print(f"[BIS] Query returned 0 results")
                 self._search_cache[cache_key] = []
-                return []
+                return {
+                    "status": "SUCCESS_NO_RESULTS",
+                    "records": [],
+                    "error": None,
+                }
 
-            records = [
-                item
-                for item in data
-                if isinstance(item, dict)
-            ]
-
-            print(f"[BIS] Results count: {len(records)}")
-            print(f"[BIS] Parsing completed")
-
-            if not records:
-                print(f"[BIS] Query returned 0 results")
+            try:
+                records = [item for item in data if isinstance(item, dict)]
+            except Exception as parse_err:
+                return {
+                    "status": "PARSER_ERROR",
+                    "records": [],
+                    "error": f"Error parsing BIS records: {parse_err}",
+                }
 
             self._search_cache[cache_key] = records
-            return records
+            return {
+                "status": "SUCCESS_WITH_RESULTS" if records else "SUCCESS_NO_RESULTS",
+                "records": records,
+                "error": None,
+            }
 
+        except httpx.TimeoutException:
+            return {
+                "status": "TIMEOUT",
+                "records": [],
+                "error": f"Timeout connecting to BIS search endpoint for query '{cleaned_query}'",
+            }
         except Exception as exc:
-            print(f"[BIS] Error during search for '{cleaned_query}': {exc}")
-            return []
+            return {
+                "status": "BIS_HTTP_ERROR",
+                "records": [],
+                "error": f"Connection error reaching BIS: {exc}",
+            }
+
+    async def search_standards(
+        self,
+        query: str,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        detailed = await self.search_standards_detailed(query, **kwargs)
+        return detailed.get("records", [])
 
     # =========================================================
     # GET STANDARD DETAILS

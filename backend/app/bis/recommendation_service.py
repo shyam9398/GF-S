@@ -974,6 +974,13 @@ class BISRecommendationService:
                         {},
                     ),
 
+                    "standard_role": item.get("standard_role") or "PRODUCT_SPECIFICATION",
+                    "role_description": item.get("role_description") or "Product Specification",
+                    "certification": item.get("certification") or {},
+                    "lifecycle_status": item.get("lifecycle_status") or "Active",
+                    "compat_reason": item.get("compat_reason") or "",
+                    "rejection_reason": item.get("compat_reason") if item.get("compatibility") == "MISMATCH" else None,
+
                     "related_standards": item.get(
                         "related_standards",
                         [],
@@ -991,8 +998,16 @@ class BISRecommendationService:
                 }
             )
 
-        # Separate into 4 exact categories: PRIMARY_APPLICABLE, RELATED_SUPPORTING, NEEDS_VERIFICATION, NOT_APPLICABLE
+        # Categorize into 5 distinct categories:
+        # 1. PRIMARY_APPLICABLE (Product Specification role ONLY, Direct Match, Active)
+        # 2. NORMATIVE_REFERENCES (Cross-referenced / Normative standards)
+        # 3. ALLIED_STANDARDS (Allied / System companion standards)
+        # 4. RELATED_SUPPORTING (Test methods, sampling, materials, headforms, guides)
+        # 5. NEEDS_VERIFICATION (Withdrawn, superseded, insufficient evidence)
+        # 6. NOT_APPLICABLE (Product scope mismatch, rejected)
         primary_applicable: list[dict[str, Any]] = []
+        normative_references: list[dict[str, Any]] = []
+        allied_standards: list[dict[str, Any]] = []
         related_supporting: list[dict[str, Any]] = []
         needs_verification: list[dict[str, Any]] = []
         not_applicable: list[dict[str, Any]] = []
@@ -1001,6 +1016,7 @@ class BISRecommendationService:
             h_class = s.get("human_classification", "")
             compat = s.get("compatibility", "")
             classif = s.get("classification", "")
+            role = s.get("standard_role", "")
             score = s.get("applicability_score") or 0
 
             # Ensure why_recommended is both a list and a string summary
@@ -1015,17 +1031,25 @@ class BISRecommendationService:
                 s["why_recommended"] = ["Standard identified from authoritative BIS retrieval."]
                 s["why_recommended_summary"] = "Standard identified from authoritative BIS retrieval."
 
-            if compat == "MISMATCH" or classif == BISApplicabilityService.NOT_APPLICABLE or h_class in ("Not Applicable", "Low Relevance") or score < 35:
+            # Hard gate checks
+            if compat == "MISMATCH" or classif == BISApplicabilityService.NOT_APPLICABLE or h_class in ("Not Applicable", "Low Relevance") or role == "RELATED_PRODUCT" or score < 35:
+                s["rejection_reason"] = s.get("rejection_reason") or s.get("compat_reason") or "Product scope does not match the procurement specification."
                 not_applicable.append(s)
-            elif compat == "UNKNOWN" or classif == BISApplicabilityService.NEEDS_VERIFICATION or h_class == "Needs Verification" or s.get("verification_required"):
+            elif compat == "UNKNOWN" or classif == BISApplicabilityService.NEEDS_VERIFICATION or "Needs Verification" in h_class or s.get("verification_required"):
                 needs_verification.append(s)
-            elif h_class == "Highly Applicable" or (classif == BISApplicabilityService.DIRECT and score >= 75):
+            elif classif in ("PRIMARY_APPLICABLE", "DIRECTLY_APPLICABLE") and role == "PRODUCT_SPECIFICATION" and compat == "DIRECT_MATCH" and score >= 70:
                 primary_applicable.append(s)
+            elif classif == "NORMATIVE_REFERENCE" or "Normative" in h_class:
+                normative_references.append(s)
+            elif classif == "ALLIED_STANDARD" or "Allied" in h_class:
+                allied_standards.append(s)
             else:
                 related_supporting.append(s)
 
         # Sort all categories in descending applicability order
         primary_applicable.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
+        normative_references.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
+        allied_standards.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
         related_supporting.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
         needs_verification.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
         not_applicable.sort(key=lambda x: x.get("applicability_score") or 0, reverse=True)
@@ -1047,18 +1071,43 @@ class BISRecommendationService:
                 if n not in all_normative:
                     all_normative.append(n)
 
+        # Also populate normative_references from cross-reference records if normative tab is empty
+        if not normative_references:
+            for r in all_normative:
+                normative_references.append({
+                    "standard_number": r.get("standard_number") if isinstance(r, dict) else str(r),
+                    "standard_name": r.get("standard_name") if isinstance(r, dict) else "Normative Reference cited in standard",
+                    "title": r.get("standard_name") if isinstance(r, dict) else "Normative Reference cited in standard",
+                    "classification": "NORMATIVE_REFERENCE",
+                    "human_classification": "Normative Reference",
+                    "standard_role": "TEST_METHOD",
+                    "role_description": "Normative Reference",
+                    "applicability_score": 80,
+                    "compatibility": "DIRECT_MATCH",
+                    "why_recommended": ["Explicitly cited by Primary Applicable Standard."],
+                    "why_recommended_summary": "Explicitly cited by Primary Applicable Standard.",
+                    "evidence": ["BIS Cross Reference Record: Normative Standard Citation"],
+                    "certification": {"status": "VOLUNTARY", "label": "Voluntary", "is_mandatory": False, "reason": "Referenced specification under primary standard"},
+                    "lifecycle_status": "Active",
+                })
+
         return {
             "success": True,
 
             "standards": frontend_standards,
-            "recommended_standards": primary_applicable + related_supporting,
+            "recommended_standards": primary_applicable + normative_references + allied_standards + related_supporting,
             "primary_applicable": primary_applicable,
+            "normative_references": normative_references,
+            "allied_standards": allied_standards,
+            "supporting_standards": related_supporting,
             "related_supporting": related_supporting,
             "needs_verification": needs_verification,
             "not_applicable": not_applicable,
 
             # Uppercase keys matching Section 2 specification
             "PRIMARY_APPLICABLE": primary_applicable,
+            "NORMATIVE_REFERENCES": normative_references,
+            "ALLIED_STANDARDS": allied_standards,
             "RELATED_SUPPORTING": related_supporting,
             "NEEDS_VERIFICATION": needs_verification,
             "NOT_APPLICABLE": not_applicable,
